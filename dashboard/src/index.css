@@ -1,0 +1,59 @@
+@import "tailwindcss";
+
+/* 1. Add Flowbite as a CSS plugin */
+@plugin "flowbite/plugin";
+
+/* 2. Tell Tailwind to scan the Flowbite node_module for classes */
+@source "../node_modules/flowbite";
+
+
+:root {
+  font-family: system-ui, Avenir, Helvetica, Arial, sans-serif;
+  line-height: 1.5;
+  font-weight: 400;
+
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+
+body {
+  margin: 0;
+  display: flex;
+  place-items: center;
+}
+
+h1 {
+  font-size: 3.2em;
+  line-height: 1.1;
+}
+
+button:focus,
+button:focus-visible {
+  outline: 0px
+}
+
+@media (prefers-color-scheme: light) {
+  :root {
+    background-color: #ffffff;
+  }
+
+}
+
+@theme {
+  /* Define your custom colors from the image */
+  --color-brand-blue: #0048EF;     /* Deep ocean top left */
+  --color-brand-teal: #40a9c0;     /* Transition teal */
+  /* --color-brand-yellow: #fdd835;   Bright yellow bottom right */
+
+  /* Update your gradient animation to use these new colors */
+  --animate-gradient-shift: gradient-shift 8s ease-in-out infinite alternate;
+
+  @keyframes gradient-shift {
+    0% { background-position: 0% 50%; }
+    50% { background-position: 100% 50%; }
+    100% { background-position: 0% 50%; }
+  }
+}
