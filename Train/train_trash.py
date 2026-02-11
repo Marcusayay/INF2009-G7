@@ -4,8 +4,8 @@ import torch
 import os 
 
 
-file_to_save_in = "taco_data_v3_with_beverage"
-base_model = r"C:\code\INF2009-G7\runs\detect\train5\weights\best.pt"
+file_to_save_in = "taco_data_v4_tetrapak"  
+base_model = "yolov8n.pt"
 
 
 if __name__ == "__main__": 
@@ -22,11 +22,12 @@ if __name__ == "__main__":
     if not os.path.exists(file_to_save_in):
         print ("📥 DOWNLOADING DATASET FROM ROBOFLOW..." )
         rf = Roboflow(api_key="M9ALLX8G3YwIkloygU6P")
-        project = rf.workspace("beveragecontainers1").project("beverage-containers-3atxb-ro6hi")
+        project = rf.workspace("zfcrow").project("beverages_waste_detection")
         version = project.version(1)
         dataset = version.download("yolov8", location=file_to_save_in)
         data_path = f"{dataset.location}/data.yaml"
-        
+
+                
     else: 
         print("✅ DATASET ALREADY DOWNLOADED.")
         data_path = os.path.abspath(f"{file_to_save_in}/data.yaml") 
@@ -44,13 +45,20 @@ if __name__ == "__main__":
 
 
     # Train for 50 epochs (Should take ~10-15 mins on your 4070)
+    # model.train(
+    #     data=data_path, 
+    #     epochs=100, 
+    #     imgsz=640, 
+    #     device=0  # This forces it to use your GPU
+    # )
     model.train(
-        data=data_path, 
-        epochs=50, 
-        imgsz=640, 
-        device=0  # This forces it to use your GPU
-    )
-
+            data=data_path, 
+            epochs=100, 
+            imgsz=640, 
+            batch=16,     # Limits VRAM usage to fit your 8GB card
+            workers=8,    # Uses your 40GB RAM to pre-load images
+            device=0
+        )
     # 4. EXPORT FOR RASPBERRY PI
     print("💾 EXPORTING TO NCNN...")
     model.export(format="ncnn")
