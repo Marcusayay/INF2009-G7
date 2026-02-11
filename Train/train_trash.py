@@ -4,6 +4,10 @@ import torch
 import os 
 
 
+file_to_save_in = "taco_data_v3_with_beverage"
+base_model = r"C:\code\INF2009-G7\runs\detect\train5\weights\best.pt"
+
+
 if __name__ == "__main__": 
     # 1. CHECK FOR YOUR RTX 4070
     if torch.cuda.is_available():
@@ -15,18 +19,17 @@ if __name__ == "__main__":
     # 2. PASTE YOUR ROBOFLOW CODE HERE (The one from your screenshot)
     # ======================================================
 
-    if not os.path.exists("taco_data_v2"):
+    if not os.path.exists(file_to_save_in):
         print ("📥 DOWNLOADING DATASET FROM ROBOFLOW..." )
         rf = Roboflow(api_key="M9ALLX8G3YwIkloygU6P")
-        project = rf.workspace("roboflow-universe-projects").project("taco-object-detection-kcxyn")
-        version = project.version(2) #! originally was 5
-        dataset = version.download("yolov8", location="taco_data_v2")
+        project = rf.workspace("beveragecontainers1").project("beverage-containers-3atxb-ro6hi")
+        version = project.version(1)
+        dataset = version.download("yolov8", location=file_to_save_in)
         data_path = f"{dataset.location}/data.yaml"
-
         
     else: 
         print("✅ DATASET ALREADY DOWNLOADED.")
-        data_path = os.path.abspath("taco_data_v2/data.yaml") 
+        data_path = os.path.abspath(f"{file_to_save_in}/data.yaml") 
                     
     # ======================================================
 
@@ -34,7 +37,11 @@ if __name__ == "__main__":
     # 3. START TRAINING
     # We use 'yolov8n.pt' (Nano) because it is fast enough for Raspberry Pi
     print("🚀 STARTING TRAINING on RTX 4070...")
-    model = YOLO("yolov8n.pt") 
+    #model = YOLO("yolov8n.pt")
+    # use the base model you want 
+    ##C:\code\INF2009-G7\runs\detect\train5\weights
+    model = YOLO(base_model) 
+
 
     # Train for 50 epochs (Should take ~10-15 mins on your 4070)
     model.train(
