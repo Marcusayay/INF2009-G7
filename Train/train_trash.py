@@ -4,7 +4,7 @@ import torch
 import os 
 
 
-file_to_save_in = "taco_data_v4_tetrapak"  
+file_to_save_in = "taco_data_v5_paper"  
 base_model = "yolov8n.pt"
 
 
@@ -22,7 +22,9 @@ if __name__ == "__main__":
     if not os.path.exists(file_to_save_in):
         print ("📥 DOWNLOADING DATASET FROM ROBOFLOW..." )
         rf = Roboflow(api_key="M9ALLX8G3YwIkloygU6P")
-        project = rf.workspace("zfcrow").project("beverages_waste_detection")
+        # project = rf.workspace("zfcrow").project("beverages_waste_detection")
+        # version = project.version(1)
+        project = rf.workspace("zfcrow").project("recyclable_object_detection")
         version = project.version(1)
         dataset = version.download("yolov8", location=file_to_save_in)
         data_path = f"{dataset.location}/data.yaml"
@@ -56,10 +58,12 @@ if __name__ == "__main__":
             epochs=100, 
             imgsz=640, 
             batch=64,     # Limits VRAM usage to fit your 8GB card
-            workers=4,    # Uses your 40GB RAM to pre-load images
-            cache=True,
+            workers=4,   
+            cache=False,
             device=0,
-            optimizer='auto'
+            optimizer='auto',
+            patience=20,
+            close_mosaic=10
         )
     # 4. EXPORT FOR RASPBERRY PI
     print("💾 EXPORTING TO NCNN...")
