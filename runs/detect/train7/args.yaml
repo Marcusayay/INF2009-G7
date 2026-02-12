@@ -1,7 +1,7 @@
 task: detect
 mode: train
 model: yolov8n.pt
-data: C:\code\INF2009-G7\train\taco_data_v4_tetrapak/data.yaml
+data: C:\code\Edge Computing\INF2009-G7\Train\taco_data_v4_tetrapak/data.yaml
 epochs: 100
 time: null
 patience: 100

@@ -55,9 +55,11 @@ if __name__ == "__main__":
             data=data_path, 
             epochs=100, 
             imgsz=640, 
-            batch=16,     # Limits VRAM usage to fit your 8GB card
-            workers=8,    # Uses your 40GB RAM to pre-load images
-            device=0
+            batch=64,     # Limits VRAM usage to fit your 8GB card
+            workers=4,    # Uses your 40GB RAM to pre-load images
+            cache=True,
+            device=0,
+            optimizer='auto'
         )
     # 4. EXPORT FOR RASPBERRY PI
     print("💾 EXPORTING TO NCNN...")
