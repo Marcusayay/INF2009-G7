@@ -2,12 +2,21 @@ from ultralytics import YOLO
 from roboflow import Roboflow
 import torch
 import os 
+from dotenv import load_dotenv  
 
 #!
 # yolo export model=runs/detect/train11/weights/best.pt format=ncnn half=True
 # yolo export model=runs/detect/train11/weights/best.pt format=tflite int8=True data=Train/taco_data_v5_paper/data.yaml
 #!
-file_to_save_in = "taco_data_v5_paper"  
+
+#! load your API KEY
+#! Get it from https://roboflow.com/account
+#! ================================ 
+load_dotenv(".env")  # Load API key from .env file
+api_key = os.getenv("ROBOFLOW_API_KEY") 
+#! ================================ 
+
+file_to_save_in = "taco_data_v6_paper"  
 base_model = "yolov8n.pt"
 
 
@@ -24,7 +33,7 @@ if __name__ == "__main__":
 
     if not os.path.exists(file_to_save_in):
         print ("📥 DOWNLOADING DATASET FROM ROBOFLOW..." )
-        rf = Roboflow(api_key="M9ALLX8G3YwIkloygU6P")
+        rf = Roboflow(api_key=api_key)
         # project = rf.workspace("zfcrow").project("beverages_waste_detection")
         # version = project.version(1)
         project = rf.workspace("zfcrow").project("recyclable_object_detection")
