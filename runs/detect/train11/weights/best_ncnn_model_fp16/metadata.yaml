@@ -1,0 +1,30 @@
+description: Ultralytics best model trained on C:\code\Edge Computing\INF2009-G7\train\taco_data_v5_paper\data.yaml
+author: Ultralytics
+date: '2026-02-20T23:00:17.627059'
+version: 8.4.14
+license: AGPL-3.0 License (https://ultralytics.com/license)
+docs: https://docs.ultralytics.com
+stride: 32
+task: detect
+batch: 1
+imgsz:
+- 640
+- 640
+names:
+  0: Tetrapak
+  1: cup-disposable
+  2: glass-bottle
+  3: glass-cup
+  4: glass-mug
+  5: glass-wine
+  6: gym bottle
+  7: metal-can
+  8: paper-general
+  9: plastic-bottle
+  10: plastic-general
+  11: plastic-wrapper
+args:
+  batch: 1
+  half: true
+channels: 3
+end2end: false

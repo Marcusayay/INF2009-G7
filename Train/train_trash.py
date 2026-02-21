@@ -3,7 +3,10 @@ from roboflow import Roboflow
 import torch
 import os 
 
-
+#!
+# yolo export model=runs/detect/train11/weights/best.pt format=ncnn half=True
+# yolo export model=runs/detect/train11/weights/best.pt format=tflite int8=True data=Train/taco_data_v5_paper/data.yaml
+#!
 file_to_save_in = "taco_data_v5_paper"  
 base_model = "yolov8n.pt"
 
@@ -66,7 +69,18 @@ if __name__ == "__main__":
             close_mosaic=10
         )
     # 4. EXPORT FOR RASPBERRY PI
-    print("💾 EXPORTING TO NCNN...")
-    model.export(format="ncnn")
+    # print("💾 EXPORTING TO NCNN...")
+    # model.export(format="ncnn")
+
+
+    # Export 1: NCNN FP16 (Your "Max Speed" winner)
+    # half=True forces it to use FP16 precision
+    print("Exporting to NCNN (FP16)...")
+    model.export(format="ncnn", half=True)
+
+    # Export 2: TFLite INT8 (Your "Best Efficiency" winner)
+    # int8=True forces integer quantization
+    print("Exporting to TFLite (INT8)...")
+    model.export(format="tflite", int8=True)
 
     print("🎉 DONE! Look for the 'best_ncnn_model' folder.")

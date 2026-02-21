@@ -1,3 +1,6 @@
 env/
 taco_data*
 .pyc
+.env
+__pycache__/
+*.onnx
