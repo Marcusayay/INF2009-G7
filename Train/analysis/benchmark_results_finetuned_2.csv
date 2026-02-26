@@ -1,0 +1,10 @@
+model,family,frames_measured,system_fps_mean,system_latency_mean_ms,system_latency_median_ms,system_latency_min_ms,system_latency_max_ms,model_inference_ms,model_preprocess_ms,model_postprocess_ms,python_overhead_ms,max_ram_percent,max_cpu_temp_c
+best.onnx,best.onn,199,7.67,130.41,130.21,125.63,186.59,124.0,3.24,2.88,0.29,22.5,84.8
+best_ncnn_model_fp32,bes,290,15.44,64.76,64.34,63.92,78.68,60.94,2.76,0.78,0.28,22.4,79.8
+best_integer_quant.tflite,bes,290,14.12,70.83,70.82,70.44,72.57,66.83,2.73,1.01,0.26,22.8,73.2
+best.pt,best.p,88,3.74,267.56,267.54,264.38,271.32,264.77,2.23,0.27,0.29,23.9,74.3
+best_full_integer_quant.tflite,bes,290,13.82,72.35,72.1,71.62,84.28,68.23,2.82,1.04,0.26,24.2,71.6
+best_float32.tflite,bes,104,4.26,234.47,234.3,233.81,236.74,230.7,2.73,0.78,0.26,24.9,72.2
+best_int8.tflite,bes,142,5.61,178.37,178.61,173.21,180.39,174.52,2.79,0.8,0.27,25.0,71.0
+best_ncnn_model_fp16,bes,290,15.56,64.27,63.86,62.92,72.77,60.43,2.78,0.79,0.28,26.0,77.7
+best_float16.tflite,bes,104,4.26,234.71,234.5,234.06,238.39,230.9,2.77,0.78,0.26,27.3,72.2

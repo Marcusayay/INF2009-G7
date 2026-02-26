@@ -1,0 +1,27 @@
+description: Ultralytics YOLO26n model trained on C:\code\Edge Computing\INF2009-G7\train\taco_data_v7_without_coco/data.yaml
+author: Ultralytics
+date: '2026-02-24T06:00:41.957652'
+version: 8.4.14
+license: AGPL-3.0 License (https://ultralytics.com/license)
+docs: https://docs.ultralytics.com
+stride: 32
+task: detect
+batch: 1
+imgsz:
+- 640
+- 640
+names:
+  0: bottle
+  1: can
+  2: cardboard
+  3: carton_tetrapack
+  4: cup_mug
+  5: disposable_cup
+  6: paper_sheet
+  7: plastic-wrapper
+  8: wine_glass
+args:
+  batch: 1
+  half: true
+channels: 3
+end2end: false

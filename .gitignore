@@ -4,3 +4,4 @@ taco_data*
 .env
 __pycache__/
 *.onnx
+MobileNet_Classification_Data
