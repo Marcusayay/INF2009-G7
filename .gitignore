@@ -5,3 +5,9 @@ taco_data*
 __pycache__/
 *.onnx
 MobileNet_Classification_Data
+
+material-and-object-classifier-*
+beverages_waste_detection.coco
+cardboard/
+disposable_cup/
+recycle_object_detection_3.coco

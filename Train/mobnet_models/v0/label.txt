@@ -1,0 +1,10 @@
+bottle
+can
+cardboard 
+carton_tetrapack
+cup_mug 
+disposable_cup
+paper_sheet
+plastic-wrapper
+wine_glass
+

@@ -3,6 +3,7 @@ import numpy as np
 import cv2 
 import os 
 
+DIR_TO_CONFIG="material-and-object-classifier-1"  # Change this to your validation folder
 # 1. Load your high-accuracy model
 model = tf.keras.models.load_model('best.keras')
 
@@ -14,14 +15,8 @@ converter.optimizations = [tf.lite.Optimize.DEFAULT]
 
 # 4. Mandatory: Representative Dataset
 # This "tells" the converter the typical range of your trash images
-# def representative_data_gen():
-#     for _ in range(100):
-#         # Generate dummy data matching your input shape (1, 224, 224, 3)
-#         data = np.random.rand(1, 224, 224, 3).astype(np.float32)
-#         yield [data]
-
 def representative_data_gen():
-    base_dir = "MobileNet_Classification_Data/valid"
+    base_dir = os.path.join(DIR_TO_CONFIG, "valid")
     all_image_paths = []
     
     for class_folder in os.listdir(base_dir):

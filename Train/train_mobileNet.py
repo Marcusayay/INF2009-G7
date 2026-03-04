@@ -1,13 +1,41 @@
+import os
+from dotenv import load_dotenv
+from roboflow import Roboflow 
 import tensorflow as tf
 from tensorflow.keras import layers, models
 from tensorflow.keras.applications.mobilenet_v2 import preprocess_input
 import matplotlib.pyplot as plt
+import cv2
+import numpy as np 
+from utils import get_latest_number 
 
+#! download 
+file_to_save_in = "material-and-object-classifier-2"
 
+#! load your API KEY
+#! Get it from https://roboflow.com/account
+#! ================================ 
+load_dotenv(".env")  # Load API key from .env file
+api_key = os.getenv("ROBOFLOW_API_KEY") 
+#! ================================ 
 
-train_dir = 'MobileNet_Classification_Data/train'
-test_dir  = 'MobileNet_Classification_Data/test'
-val_dir   = 'MobileNet_Classification_Data/valid'
+if not os.path.exists(file_to_save_in):
+    print ("📥 DOWNLOADING DATASET FROM ROBOFLOW..." )
+    rf = Roboflow(api_key=api_key)
+    project = rf.workspace("zfcrow").project("material-and-object-classifer")
+    version = project.version(2)
+    dataset = version.download("folder", location=file_to_save_in)       
+else: 
+    print("✅ DATASET ALREADY DOWNLOADED.")
+                
+# ====================================================== 
+#! TRAINING
+# train_dir = 'MobileNet_Classification_Data/train'
+# test_dir  = 'MobileNet_Classification_Data/test'
+# val_dir   = 'MobileNet_Classification_Data/valid'
+train_dir = f"{file_to_save_in}/train"
+test_dir  = f"{file_to_save_in}/test"
+val_dir   = f"{file_to_save_in}/valid"
 
 BATCH_SIZE = 32
 IMG_SIZE = (224, 224)
@@ -28,25 +56,23 @@ test_dataset = tf.keras.utils.image_dataset_from_directory(
     label_mode="int"
 )
 
-num_classes = len(train_dataset.class_names) 
+ 
+counts = {}
+# Look inside the train directory
+for class_name in os.listdir(train_dir):
+    class_path = os.path.join(train_dir, class_name)
+    # Only count if it is an actual folder
+    if os.path.isdir(class_path): 
+        counts[class_name] = len(os.listdir(class_path))
 
-counts = {
-    "bottle": 26162,
-    "can": 7471,
-    "cardboard": 9439,
-    "carton_tetrapack": 9189,
-    "cup_mug": 7248,
-    "disposable_cup": 2186,
-    "paper_sheet": 2389,
-    "plastic-wrapper": 7628,
-    "wine_glass": 2023,
-}
-missing = [n for n in train_dataset.class_names if n not in counts]
-extra = [n for n in counts if n not in train_dataset.class_names]
-print("Missing in counts:", missing)
-print("Extra in counts:", extra)
+# save the names to label.txt
+with open("labels.txt", "w") as f:
+    for class_name in sorted(counts.keys()):
+        f.write(f"{class_name}\n") 
 
+print("Actual Training Images per Class:", counts)
 
+num_classes = len(counts)
 total = sum(counts.values())
 class_weight = {
     i: total / (num_classes * counts[name])
@@ -171,4 +197,96 @@ def plot_history(h1, h2):
     plt.title('Training and Validation Accuracy')
     plt.show()
 
+
+
+
+# convert and quantize
+
+
+
+# =========================================================================
+# 🚀 AUTOMATED TFLITE CONVERSIONS (FP32 & UINT8)
+# =========================================================================
+print("\n=======================================================")
+print("🚀 STARTING AUTOMATED TFLITE CONVERSIONS")
+print("=======================================================\n")
+
+# --- 1. FP32 CONVERSION ---
+print("Converting to FP32 TFLite (No Quantization)...")
+converter_fp32 = tf.lite.TFLiteConverter.from_keras_model(model)
+tflite_fp32_model = converter_fp32.convert()
+
+with open('best_fp32.tflite', 'wb') as f:
+    f.write(tflite_fp32_model)
+print("✅ FP32 Conversion Complete! Saved as 'best_fp32.tflite'")
+
+
+# --- 2. UINT8/INT8 QUANTIZATION ---
+print("\nConverting to UINT8 TFLite (Full Integer Quantization)...")
+converter_quant = tf.lite.TFLiteConverter.from_keras_model(model)
+converter_quant.optimizations = [tf.lite.Optimize.DEFAULT]
+
+def representative_data_gen():
+    # We can reuse the val_dir variable you defined at the top of the script!
+    base_dir = val_dir 
+    all_image_paths = []
+    
+    for class_folder in os.listdir(base_dir):
+        class_path = os.path.join(base_dir, class_folder)
+        if os.path.isdir(class_path):
+            valid_exts = ('.jpg', '.jpeg', '.png', '.bmp')
+            images = [os.path.join(class_path, f) for f in os.listdir(class_path) 
+                      if f.lower().endswith(valid_exts)]
+            all_image_paths.extend(images[:20]) 
+
+    np.random.shuffle(all_image_paths)
+    
+    count = 0
+    for img_path in all_image_paths:
+        if count >= 100: break 
+        
+        img = cv2.imread(img_path)
+        if img is None:
+            continue
+            
+        img = cv2.resize(img, (224, 224))
+        img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+        
+        # 🚨 THE FIX: Use exact same preprocessing as the training loop
+        img = tf.cast(img, tf.float32)
+        img = preprocess_input(img) 
+        
+        count += 1
+        yield [tf.expand_dims(img, axis=0)]
+
+converter_quant.representative_dataset = representative_data_gen
+converter_quant.target_spec.supported_ops = [tf.lite.OpsSet.TFLITE_BUILTINS_INT8]
+converter_quant.inference_input_type = tf.uint8
+converter_quant.inference_output_type = tf.uint8
+
+tflite_quant_model = converter_quant.convert()
+
+with open('best_quantized.tflite', 'wb') as f:
+    f.write(tflite_quant_model)
+print("✅ Quantization Complete! Saved as 'best_quantized.tflite'")
+
+print("\n🎉 ALL PIPELINE STEPS COMPLETED SUCCESSFULLY! Move your .tflite files and labels.txt to the Pi 5.")
+
+
+#! look for all 3 files and label.txt and move them to 
+#! mobnet_models/v{latest_version}/
+latest_version = get_latest_number("mobnet_models") 
+dest_dir = f"mobnet_models/v{latest_version}" 
+os.makedirs(dest_dir, exist_ok=True)
+
+for filename in ["best.keras","best_fp32.tflite", "best_quantized.tflite", "labels.txt"]:
+    src_path = filename
+    dest_path = os.path.join(dest_dir, filename)
+    os.rename(src_path, dest_path)
+    print(f"✅ Moved '{filename}' to '{dest_dir}'")
+
+
+
+
+#! plot the training history (optional, but nice to see the curves) 
 plot_history(history, history_ft)
