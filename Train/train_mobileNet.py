@@ -10,10 +10,14 @@ import numpy as np
 from utils import get_latest_number 
 
 #! download 
-file_to_save_in = "material-and-object-classifier-2"
+file_to_save_in = "material-and-object-classifier-4"
 train_dir = f"{file_to_save_in}/train"
 test_dir  = f"{file_to_save_in}/test"
 val_dir   = f"{file_to_save_in}/valid"
+
+#! originally 224
+RESOLUTION = 320  # MobileNetV2's expected input size
+#!
 #! load your API KEY
 #! Get it from https://roboflow.com/account
 #! ================================ 
@@ -26,7 +30,7 @@ def download():
         print ("📥 DOWNLOADING DATASET FROM ROBOFLOW..." )
         rf = Roboflow(api_key=api_key)
         project = rf.workspace("zfcrow").project("material-and-object-classifer")
-        version = project.version(2)
+        version = project.version(5)
         dataset = version.download("folder", location=file_to_save_in)       
     else: 
         print("✅ DATASET ALREADY DOWNLOADED.")
@@ -42,7 +46,7 @@ def mobilenet_preprocess(x, y):
 #! TRAINING
 def train(): 
     BATCH_SIZE = 32
-    IMG_SIZE = (224, 224)
+    IMG_SIZE = (RESOLUTION, RESOLUTION)
     AUTOTUNE = tf.data.AUTOTUNE
 
     train_dataset = tf.keras.utils.image_dataset_from_directory(
@@ -99,7 +103,7 @@ def train():
     #! phase 1 
 
     base_model = tf.keras.applications.MobileNetV2(
-        input_shape=(224, 224, 3),
+        input_shape=(RESOLUTION, RESOLUTION, 3),
         include_top=False,
         weights='imagenet'
     )
@@ -243,7 +247,7 @@ def convert_and_quantize(model):
             if img is None:
                 continue
                 
-            img = cv2.resize(img, (224, 224))
+            img = cv2.resize(img, (RESOLUTION, RESOLUTION))
             img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
             
             # 🚨 THE FIX: Use exact same preprocessing as the training loop
@@ -286,8 +290,8 @@ def convert_and_quantize(model):
 
 if __name__ == "__main__":
     download() 
-    # model, h1,h2 = train() 
-    # convert_and_quantize(model) 
+    model, h1,h2 = train() 
+    convert_and_quantize(model) 
     
-    # #! plot the training history (optional, but nice to see the curves) 
-    #plot_history(h1, h2) 
+    #! plot the training history (optional, but nice to see the curves) 
+    plot_history(h1, h2) 
