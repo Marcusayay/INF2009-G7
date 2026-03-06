@@ -10,7 +10,7 @@ import numpy as np
 from utils import get_latest_number 
 
 #! download 
-file_to_save_in = "material-and-object-classifier-2"
+file_to_save_in = "material-and-object-classifier-3"
 
 #! load your API KEY
 #! Get it from https://roboflow.com/account

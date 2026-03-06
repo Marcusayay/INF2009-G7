@@ -11,3 +11,5 @@ beverages_waste_detection.coco
 cardboard/
 disposable_cup/
 recycle_object_detection_3.coco
+metal_bottle/
+tumbler detection.coco
