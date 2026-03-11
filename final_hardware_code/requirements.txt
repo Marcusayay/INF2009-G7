@@ -1,0 +1,7 @@
+hx711
+opencv-python
+numpy
+rpi-lgpio
+gpiozero
+pimoroni-as7343
+smbus2
