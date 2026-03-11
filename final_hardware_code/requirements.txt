@@ -5,3 +5,4 @@ rpi-lgpio
 gpiozero
 pimoroni-as7343
 smbus2
+matplotlib

@@ -6,7 +6,7 @@ from as7343 import AS7343
 # ==========================================
 # CONFIGURATION
 # ==========================================
-GAIN = 64
+GAIN = 512
 INTEGRATION_TIME = 200
 CALIBRATION_SAMPLES = 12   # samples per material during calibration
 SCAN_SAMPLES = 6           # readings averaged per scan
