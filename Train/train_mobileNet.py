@@ -10,13 +10,13 @@ import numpy as np
 from utils import get_latest_number 
 
 #! download 
-file_to_save_in = "material-and-object-classifier-4"
+file_to_save_in = "material-and-object-classifier-6"
 train_dir = f"{file_to_save_in}/train"
 test_dir  = f"{file_to_save_in}/test"
 val_dir   = f"{file_to_save_in}/valid"
 
 #! originally 224
-RESOLUTION = 320  # MobileNetV2's expected input size
+RESOLUTION = 224  # MobileNetV2's expected input size
 #!
 #! load your API KEY
 #! Get it from https://roboflow.com/account
@@ -29,8 +29,8 @@ def download():
     if not os.path.exists(file_to_save_in):
         print ("📥 DOWNLOADING DATASET FROM ROBOFLOW..." )
         rf = Roboflow(api_key=api_key)
-        project = rf.workspace("zfcrow").project("material-and-object-classifer")
-        version = project.version(5)
+        project = rf.workspace("zheng-fengs-workspace").project("material-object-classifier")
+        version = project.version(2)
         dataset = version.download("folder", location=file_to_save_in)       
     else: 
         print("✅ DATASET ALREADY DOWNLOADED.")
@@ -75,6 +75,8 @@ def train():
         for class_name in sorted(counts.keys()):
             f.write(f"{class_name}\n") 
 
+
+
     print("Actual Training Images per Class:", counts)
 
     num_classes = len(counts)
@@ -84,7 +86,17 @@ def train():
         for i, name in enumerate(train_dataset.class_names)
     }
 
-
+    # save the configs to a text file for later reference
+    with open("training_config.txt", "w") as f: 
+        f.write(f"Resolution: {RESOLUTION}x{RESOLUTION}\n")
+        f.write(f"Batch Size: {BATCH_SIZE}\n")
+        f.write(f"Base Model: MobileNetV2\n")
+        f.write(f"Initial Learning Rate: 1e-4\n")
+        f.write(f"Fine-tuning Learning Rate: 1e-5\n")
+        f.write(f"Epochs Phase 1: 8\n")
+        f.write(f"Epochs Phase 2: 10\n")
+        f.write(f"Data Augmentation: RandomFlip, RandomRotation, RandomZoom, RandomContrast\n")
+        f.write(f"Class Weights: {class_weight}\n")
 
 
     train_dataset = train_dataset.map(
@@ -277,7 +289,7 @@ def convert_and_quantize(model):
     dest_dir = f"mobnet_models/v{latest_version}" 
     os.makedirs(dest_dir, exist_ok=True)
 
-    for filename in ["best.keras","best_fp32.tflite", "best_quantized.tflite", "labels.txt"]:
+    for filename in ["best.keras","best_fp32.tflite", "best_quantized.tflite", "labels.txt", "training_config.txt"]:
         src_path = filename
         dest_path = os.path.join(dest_dir, filename)
         os.rename(src_path, dest_path)
