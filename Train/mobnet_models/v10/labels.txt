@@ -1,0 +1,7 @@
+carton_tetrapack
+disposable
+glass_bottle
+metal_bottle
+metal_can
+no_object
+plastic_bottle
