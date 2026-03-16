@@ -17,6 +17,9 @@ val_dir   = f"{file_to_save_in}/valid"
 
 #! originally 224
 RESOLUTION = 224  # MobileNetV2's expected input size
+BATCH_SIZE = 32
+IMG_SIZE = (RESOLUTION, RESOLUTION)
+AUTOTUNE = tf.data.AUTOTUNE
 #!
 #! load your API KEY
 #! Get it from https://roboflow.com/account
@@ -47,9 +50,7 @@ def mobilenet_preprocess(x, y):
 
 #! TRAINING
 def train(): 
-    BATCH_SIZE = 32
-    IMG_SIZE = (RESOLUTION, RESOLUTION)
-    AUTOTUNE = tf.data.AUTOTUNE
+
 
     train_dataset = tf.keras.utils.image_dataset_from_directory(
         train_dir, shuffle=True, batch_size=BATCH_SIZE, image_size=IMG_SIZE,
@@ -298,14 +299,201 @@ def convert_and_quantize(model):
         print(f"✅ Moved '{filename}' to '{dest_dir}'")
 
 
+def train_with_custom_base(model_path="mobnet_models/v7/best.keras"):
+    # -----------------------------
+    # Load datasets
+    # -----------------------------
+    train_dataset = tf.keras.utils.image_dataset_from_directory(
+        train_dir,
+        shuffle=True,
+        batch_size=BATCH_SIZE,
+        image_size=IMG_SIZE,
+        label_mode="int"
+    )
 
-# plot_history(history, history_ft)
+    validation_dataset = tf.keras.utils.image_dataset_from_directory(
+        val_dir,
+        shuffle=True,
+        batch_size=BATCH_SIZE,
+        image_size=IMG_SIZE,
+        label_mode="int"
+    )
 
+    test_dataset = tf.keras.utils.image_dataset_from_directory(
+        test_dir,
+        shuffle=False,
+        batch_size=BATCH_SIZE,
+        image_size=IMG_SIZE,
+        label_mode="int"
+    )
+
+    # -----------------------------
+    # Count classes
+    # -----------------------------
+    counts = {}
+    for class_name in os.listdir(train_dir):
+        class_path = os.path.join(train_dir, class_name)
+        if os.path.isdir(class_path):
+            counts[class_name] = len(os.listdir(class_path))
+
+    print("Actual Training Images per Class:", counts)
+
+    num_classes = len(counts)
+    total = sum(counts.values())
+
+    class_weight = {
+        i: total / (num_classes * counts[name])
+        for i, name in enumerate(train_dataset.class_names)
+    }
+
+    # Save labels
+    with open("labels.txt", "w") as f:
+        for class_name in train_dataset.class_names:
+            f.write(f"{class_name}\n")
+
+    # Save config
+    with open("training_config.txt", "w") as f:
+        f.write(f"Resolution: {RESOLUTION}x{RESOLUTION}\n")
+        f.write(f"Batch Size: {BATCH_SIZE}\n")
+        f.write(f"Base Model Source: {model_path}\n")
+        f.write("Transfer Type: Custom pretrained model\n")
+        f.write("Initial Learning Rate: 1e-4\n")
+        f.write("Fine-tuning Learning Rate: 1e-5\n")
+        f.write("Epochs Phase 1: 8\n")
+        f.write("Epochs Phase 2: 10\n")
+        f.write("Data Augmentation: RandomFlip, RandomRotation, RandomZoom, RandomContrast\n")
+        f.write(f"Class Weights: {class_weight}\n")
+
+    # -----------------------------
+    # Preprocessing
+    # -----------------------------
+    train_dataset = train_dataset.map(
+        mobilenet_preprocess, num_parallel_calls=AUTOTUNE
+    ).cache("cache_train").prefetch(AUTOTUNE)
+
+    validation_dataset = validation_dataset.map(
+        mobilenet_preprocess, num_parallel_calls=AUTOTUNE
+    ).cache("cache_val").prefetch(AUTOTUNE)
+
+    test_dataset = test_dataset.map(
+        mobilenet_preprocess, num_parallel_calls=AUTOTUNE
+    ).cache("cache_test").prefetch(AUTOTUNE)
+
+    # -----------------------------
+    # New augmentation
+    # -----------------------------
+    data_augmentation = tf.keras.Sequential([
+        layers.RandomFlip("horizontal"),
+        layers.RandomRotation(0.05),
+        layers.RandomZoom(0.1),
+        layers.RandomContrast(0.1),
+    ])
+
+    # -----------------------------
+    # Load old model
+    # -----------------------------
+    print(f"🔄 Loading previous model from {model_path}...")
+    old_model = tf.keras.models.load_model(model_path)
+
+    print("\nOld model summary:")
+    old_model.summary()
+
+    # -----------------------------
+    # Extract old backbone cleanly
+    # -----------------------------
+    old_backbone = old_model.layers[1]   # MobileNetV2 from old Sequential model
+    old_backbone.trainable = False
+
+    # -----------------------------
+    # Build new model
+    # -----------------------------
+    model = models.Sequential([
+        data_augmentation,
+        old_backbone,
+        layers.GlobalAveragePooling2D(),
+        layers.Dropout(0.2),
+        layers.Dense(num_classes, activation="softmax")
+    ])
+
+    callbacks = [
+        tf.keras.callbacks.ModelCheckpoint(
+            "best.keras", save_best_only=True, monitor="val_accuracy"
+        ),
+        tf.keras.callbacks.EarlyStopping(
+            patience=3, restore_best_weights=True, monitor="val_accuracy"
+        ),
+        tf.keras.callbacks.ReduceLROnPlateau(
+            patience=2, factor=0.2, monitor="val_loss"
+        ),
+    ]
+
+    # -----------------------------
+    # Phase 1
+    # -----------------------------
+    print("\n🚀 Phase 1: Training new classifier head...")
+    model.compile(
+        optimizer=tf.keras.optimizers.Adam(learning_rate=1e-4),
+        loss="sparse_categorical_crossentropy",
+        metrics=["accuracy"]
+    )
+
+    model.summary()
+
+    history = model.fit(
+        train_dataset,
+        validation_data=validation_dataset,
+        epochs=8,
+        callbacks=callbacks,
+        class_weight=class_weight
+    )
+
+    # -----------------------------
+    # Phase 2
+    # -----------------------------
+    print("\n🚀 Phase 2: Fine-tuning top layers...")
+    old_backbone.trainable = True
+
+    for layer in old_backbone.layers[:-30]:
+        layer.trainable = False
+
+    for layer in old_backbone.layers:
+        if isinstance(layer, tf.keras.layers.BatchNormalization):
+            layer.trainable = False
+
+    model.compile(
+        optimizer=tf.keras.optimizers.Adam(learning_rate=1e-5),
+        loss="sparse_categorical_crossentropy",
+        metrics=[
+            "accuracy",
+            tf.keras.metrics.SparseTopKCategoricalAccuracy(k=3, name="top3_acc")
+        ]
+    )
+
+    model.summary()
+
+    history_ft = model.fit(
+        train_dataset,
+        validation_data=validation_dataset,
+        epochs=10,
+        callbacks=callbacks,
+        class_weight=class_weight
+    )
+
+    test_loss, test_acc, test_top3 = model.evaluate(test_dataset)
+    print(f"\nFinal Test Accuracy: {test_acc:.4f}")
+    print(f"Final Test Top-3 Accuracy: {test_top3:.4f}")
+
+    return model, history, history_ft
 
 if __name__ == "__main__":
     download() 
-    model, h1,h2 = train() 
+    #model, h1,h2 = train() 
+    model , h1, h2 = train_with_custom_base()
     convert_and_quantize(model) 
     
     #! plot the training history (optional, but nice to see the curves) 
     plot_history(h1, h2) 
+
+    # old_model = tf.keras.models.load_model("Train/mobnet_models/v7/best.keras")
+    # for i, layer in enumerate(old_model.layers):
+    #     print(i, layer.name, type(layer))
