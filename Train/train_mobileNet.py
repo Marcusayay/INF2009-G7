@@ -10,7 +10,7 @@ import numpy as np
 from utils import get_latest_number 
 
 #! download 
-file_to_save_in = "material-and-object-classifier-9"
+file_to_save_in = "material-and-object-classifier-10"
 train_dir = f"{file_to_save_in}/train"
 test_dir  = f"{file_to_save_in}/test"
 val_dir   = f"{file_to_save_in}/valid"
@@ -32,10 +32,10 @@ def download():
     if not os.path.exists(file_to_save_in):
         print ("📥 DOWNLOADING DATASET FROM ROBOFLOW..." )
         rf = Roboflow(api_key=api_key)
-        # project = rf.workspace("zheng-fengs-workspace").project("material-object-classifier")
-        # version = project.version(3)
-        project = rf.workspace("zheng-fengs-workspace").project("trash_classifier-rw6qs")
-        version = project.version(2)
+        project = rf.workspace("zheng-fengs-workspace").project("material-object-classifier")
+        version = project.version(4)
+        # project = rf.workspace("zheng-fengs-workspace").project("trash_classifier-rw6qs")
+        # version = project.version(2)
         dataset = version.download("folder", location=file_to_save_in)       
     else: 
         print("✅ DATASET ALREADY DOWNLOADED.")
@@ -487,8 +487,8 @@ def train_with_custom_base(model_path="mobnet_models/v7/best.keras"):
 
 if __name__ == "__main__":
     download() 
-    #model, h1,h2 = train() 
-    model , h1, h2 = train_with_custom_base()
+    model, h1,h2 = train() 
+    #model , h1, h2 = train_with_custom_base()
     convert_and_quantize(model) 
     
     #! plot the training history (optional, but nice to see the curves) 
