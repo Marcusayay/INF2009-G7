@@ -10,7 +10,7 @@ import numpy as np
 from utils import get_latest_number 
 
 #! download 
-file_to_save_in = "material-and-object-classifier-10"
+file_to_save_in = "material-and-object-classifier-11"
 train_dir = f"{file_to_save_in}/train"
 test_dir  = f"{file_to_save_in}/test"
 val_dir   = f"{file_to_save_in}/valid"
@@ -33,7 +33,7 @@ def download():
         print ("📥 DOWNLOADING DATASET FROM ROBOFLOW..." )
         rf = Roboflow(api_key=api_key)
         project = rf.workspace("zheng-fengs-workspace").project("material-object-classifier")
-        version = project.version(4)
+        version = project.version(5)
         # project = rf.workspace("zheng-fengs-workspace").project("trash_classifier-rw6qs")
         # version = project.version(2)
         dataset = version.download("folder", location=file_to_save_in)       
@@ -486,7 +486,7 @@ def train_with_custom_base(model_path="mobnet_models/v7/best.keras"):
     return model, history, history_ft
 
 if __name__ == "__main__":
-    download() 
+    #download() 
     model, h1,h2 = train() 
     #model , h1, h2 = train_with_custom_base()
     convert_and_quantize(model) 
