@@ -37,6 +37,8 @@ MIN_TOTAL_COUNTS = 500
 try:
     sensor = AS7343()
     sensor.set_integration_time(INTEGRATION_TIME)
+    sensor.set_illumination_led(True)
+
 except Exception as e:
     print(f"Hardware Error: {e}")
     sys.exit()

@@ -22,6 +22,8 @@ try:
     sensor = AS7343()
     sensor.set_gain(GAIN)
     sensor.set_integration_time(INTEGRATION_TIME)
+    sensor.set_illumination_led(False)
+
 except Exception as e:
     print(f"Hardware Error: {e}")
     sys.exit()
