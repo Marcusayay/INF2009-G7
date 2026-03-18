@@ -1,4 +1,3 @@
-Unlabeled
 carton_tetrapack
 disposable_cup
 glass_bottle
