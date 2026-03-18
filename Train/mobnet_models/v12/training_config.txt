@@ -1,0 +1,9 @@
+Resolution: 224x224
+Batch Size: 32
+Base Model: MobileNetV2
+Initial Learning Rate: 1e-4
+Fine-tuning Learning Rate: 1e-5
+Epochs Phase 1: 8
+Epochs Phase 2: 10
+Data Augmentation: RandomFlip, RandomRotation, RandomZoom, RandomContrast
+Class Weights: {0: 0.23493843447669305, 1: 2.1629554655870447, 2: 2.171747967479675, 3: 1.6124245472837022, 4: 1.0387232663642256, 5: 3.2776073619631902, 6: 2.204607977991747, 7: 2.0869140625}
