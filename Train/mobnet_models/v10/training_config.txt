@@ -1,0 +1,10 @@
+Resolution: 224x224
+Batch Size: 32
+Base Model Source: mobnet_models/v7/best.keras
+Transfer Type: Custom pretrained model
+Initial Learning Rate: 1e-4
+Fine-tuning Learning Rate: 1e-5
+Epochs Phase 1: 8
+Epochs Phase 2: 10
+Data Augmentation: RandomFlip, RandomRotation, RandomZoom, RandomContrast
+Class Weights: {0: 0.6640344580043073, 1: 1.6726943942133816, 2: 0.8868648130393096, 3: 3.3035714285714284, 4: 1.1011904761904763, 5: 13.214285714285714, 6: 0.4028745644599303}

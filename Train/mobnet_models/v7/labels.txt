@@ -1,0 +1,12 @@
+cardboard
+carton_tetrapack
+disposable_cup
+glass_bottle
+glass_cup
+metal_bottle
+metal_can
+paper
+paper_container
+paper_wrapper
+plastic_bottle
+plastic_wrapper

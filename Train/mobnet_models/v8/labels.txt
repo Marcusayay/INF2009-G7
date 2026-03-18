@@ -1,0 +1,6 @@
+carton_tetrapack
+disposable
+glass_bottle
+metal_bottle
+metal_can
+plastic_bottle
