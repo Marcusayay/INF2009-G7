@@ -10,7 +10,7 @@ import numpy as np
 from utils import get_latest_number 
 
 #! download 
-file_to_save_in = "material-and-object-classifier-11"
+file_to_save_in = "material-and-object-classifier-12"
 train_dir = f"{file_to_save_in}/train"
 test_dir  = f"{file_to_save_in}/test"
 val_dir   = f"{file_to_save_in}/valid"
@@ -486,7 +486,7 @@ def train_with_custom_base(model_path="mobnet_models/v7/best.keras"):
     return model, history, history_ft
 
 if __name__ == "__main__":
-    #download() 
+    download() 
     model, h1,h2 = train() 
     #model , h1, h2 = train_with_custom_base()
     convert_and_quantize(model) 
