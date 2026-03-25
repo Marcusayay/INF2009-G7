@@ -62,6 +62,13 @@ import os
 from datetime import datetime
 
 DATA_FILE = "bin_stats.json"
+DEFAULT_TOTALS = {
+    "plastic": {"cans": 0, "bottles": 0},
+    "metal": {"cans": 0, "bottles": 0},
+    "glass": {"cans": 0, "bottles": 0},
+    "general": {"cans": 0, "bottles": 0},
+    "tetra": {"cartons": 0}
+}
 
 # Load existing data or start fresh
 if os.path.exists(DATA_FILE):
@@ -69,14 +76,16 @@ if os.path.exists(DATA_FILE):
         stored_data = json.load(f)
 else:
     stored_data = {
-        "totals": {
-            "plastic": {"cans": 0, "bottles": 0},
-            "metal": {"cans": 0, "bottles": 0},
-            "glass": {"cans": 0, "bottles": 0},
-            "general": {"cans": 0, "bottles": 0}
-        },
+        "totals": DEFAULT_TOTALS,
         "history": [] # <--- This is where we store the "Cache"
     }
+
+# Backfill new materials/keys in older saved files
+for material, default_counts in DEFAULT_TOTALS.items():
+    stored_data.setdefault("totals", {}).setdefault(material, default_counts.copy())
+    for key, value in default_counts.items():
+        stored_data["totals"][material].setdefault(key, value)
+stored_data.setdefault("history", [])
 
 def save_data():
     with open(DATA_FILE, "w") as f:
@@ -89,7 +98,29 @@ def on_message(client, userdata, msg):
         mat = tx["material"].lower()
         # Handle singular/plural consistency
         raw_type = tx["type"].lower()
-        key_type = "bottles" if "bottle" in raw_type else "cans"
+        if "bottle" in raw_type:
+            key_type = "bottles"
+        elif "carton" in raw_type:
+            key_type = "cartons"
+        elif "can" in raw_type:
+            key_type = "cans"
+        else:
+            print(f"⏭️ Ignored unknown item type: {raw_type}")
+            return
+
+        # Plastic and glass cans are no longer tracked.
+        if mat in ("plastic", "glass") and key_type == "cans":
+            print(f"⏭️ Ignored unsupported type for {mat}: {raw_type}")
+            return
+
+        if mat not in stored_data["totals"]:
+            if mat == "tetra":
+                stored_data["totals"][mat] = {"cartons": 0}
+            else:
+                stored_data["totals"][mat] = {"cans": 0, "bottles": 0}
+
+        if key_type not in stored_data["totals"][mat]:
+            stored_data["totals"][mat][key_type] = 0
 
         # 1. Update Totals
         stored_data["totals"][mat][key_type] += 1
