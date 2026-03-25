@@ -182,9 +182,12 @@ try:
         # --- Vision ---
         corrected = correct_frame(frame)
         hsv = cv2.cvtColor(corrected, cv2.COLOR_BGR2HSV)
-        mask1 = cv2.inRange(hsv, np.array([0, 80, 45]), np.array([10, 255, 90]))
-        mask2 = cv2.inRange(hsv, np.array([170, 80, 45]), np.array([179, 255, 90]))
-        mask = mask1 | mask2
+        mask1 = cv2.inRange(hsv, np.array([0, 55, 15]), np.array([15, 255, 160]))
+        mask2 = cv2.inRange(hsv, np.array([170, 55  , 15]), np.array([179, 255, 160]))
+       
+        mask4 = cv2.inRange(hsv, np.array([150, 200  , 45]), np.array([179, 255, 70]))
+
+        mask = mask1 | mask2  | mask4
         kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
         mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
         
@@ -196,7 +199,7 @@ try:
 
         if contours:
             largest = max(contours, key=cv2.contourArea)
-            if cv2.contourArea(largest) > 250:
+            if cv2.contourArea(largest) > 50:
                 tape_found = True
                 last_tape_seen_time = time.time()
 
