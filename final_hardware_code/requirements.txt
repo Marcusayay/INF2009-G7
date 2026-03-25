@@ -1,5 +1,4 @@
 hx711
-opencv-python
 numpy
 rpi-lgpio
 gpiozero
