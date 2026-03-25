@@ -12,21 +12,20 @@ export default function HomePage() {
   const [selectedRange, setSelectedRange] = useState("Today");
 
   const [data, setData] = useState({
-    plastic: { cans: 0, bottles: 0 },
+    plastic: { bottles: 0 },
     metal: { cans: 0, bottles: 0 },
-    glass: { cans: 0, bottles: 0 },
-    general: { cans: 0, bottles: 0 }
+    glass: { bottles: 0 },
+    general: { cans: 0, bottles: 0 },
+    tetra: { cartons: 0 }
   });
 
   const [transactions, setTransactions] = useState([]);
 
   // Helper function moved outside useEffect or defined inside
-  const getIcon = (mat, type) => {
-    const material = mat?.toLowerCase() || "";
+  const getIcon = (type) => {
     const itemType = type?.toLowerCase() || "";
 
-    if (material === "general") return "🍌";
-    if (material === "glass") return "🗑️"; 
+    if (itemType.includes("carton")) return "🧃";
     if (itemType.includes("bottle")) return "🍼";
     if (itemType.includes("can")) return "🥫";
     return "📦"; 
@@ -49,10 +48,21 @@ export default function HomePage() {
         if (payload.totals) {
           setData((prev) => ({
             ...prev,
-            [material]: {
-              cans: payload.totals.cans,
-              bottles: payload.totals.bottles,
-            },
+            ...(material === "plastic" && {
+              plastic: { bottles: payload.totals.bottles ?? 0 }
+            }),
+            ...(material === "glass" && {
+              glass: { bottles: payload.totals.bottles ?? 0 }
+            }),
+            ...(material === "tetra" && {
+              tetra: { cartons: payload.totals.cartons ?? payload.totals.cans ?? 0 }
+            }),
+            ...(["metal", "general"].includes(material) && {
+              [material]: {
+                cans: payload.totals.cans ?? 0,
+                bottles: payload.totals.bottles ?? 0,
+              }
+            })
           }));
         }
 
@@ -62,9 +72,16 @@ export default function HomePage() {
           const formattedHistory = payload.history.map(item => ({
             ...item,
             // We re-calculate icons based on the stored material/type
-            icon: getIcon(item.material, item.type)
+            icon: getIcon(item.type)
           }));
-          setTransactions(formattedHistory);
+
+          const filteredHistory = formattedHistory.filter((item) => {
+            const mat = item.material?.toLowerCase() || "";
+            const type = item.type?.toLowerCase() || "";
+            return !(type.includes("can") && (mat === "plastic" || mat === "glass"));
+          });
+
+          setTransactions(filteredHistory);
         }
 
       } catch (err) {
@@ -76,21 +93,12 @@ export default function HomePage() {
   }, []);
 
    const calculateCO2 = () => {
-    // Constants (kg of CO2 saved per item)
-      const factors = {
-        plastic: { cans: 0.05, bottles: 0.05 }, // Adjust if plastic cans exist
-        metal: { cans: 0.09, bottles: 0.09 },
-        glass: { cans: 0.10, bottles: 0.10 },
-        general: { cans: 0, bottles: 0 } // General waste usually doesn't save CO2
-      };
-
-      let totalSaved = 0;
-
-      // Loop through each material in our state
-      Object.keys(data).forEach((material) => {
-        totalSaved += data[material].cans * factors[material].cans;
-        totalSaved += data[material].bottles * factors[material].bottles;
-      });
+      const totalSaved =
+        data.plastic.bottles * 0.05 +
+        data.metal.cans * 0.09 +
+        data.metal.bottles * 0.09 +
+        data.glass.bottles * 0.10 +
+        data.tetra.cartons * 0.08;
 
       // Return formatted to 2 decimal places
       return totalSaved.toFixed(2);
@@ -107,11 +115,27 @@ export default function HomePage() {
       />
 
       {/* Material Grid */}
-      <div className="grid grid-cols-1 xl:grid-cols-4 gap-6 mb-8">
-        <MaterialCard title="Plastic" cans={data.plastic.cans} bottles={data.plastic.bottles} />
+      <div className="grid grid-cols-1 xl:grid-cols-5 gap-6 mb-8">
+        <MaterialCard
+          title="Plastic"
+          cans={data.plastic.bottles}
+          firstLabel="Bottles"
+          showSecond={false}
+        />
         <MaterialCard title="Metal" cans={data.metal.cans} bottles={data.metal.bottles} />
-        <MaterialCard title="Glass" cans={data.glass.cans} bottles={data.glass.bottles} />
+        <MaterialCard
+          title="Glass"
+          cans={data.glass.bottles}
+          firstLabel="Bottles"
+          showSecond={false}
+        />
         <MaterialCard title="General" cans={data.general.cans} bottles={data.general.bottles} />
+        <MaterialCard
+          title="Tetra"
+          cans={data.tetra.cartons}
+          firstLabel="Cartons"
+          showSecond={false}
+        />
       </div>
 
       {/* Environmental Impact Banner */}

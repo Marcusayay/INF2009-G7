@@ -9,3 +9,4 @@ MobileNet_Classification_Data
 material-and-object-classifier-*
 Train/extraction/data/
 cache_
+/node_modules

@@ -9,8 +9,13 @@ PORT = 1883
 TOPIC = "pi/raw_transaction"
 
 # --- SIMULATION DATA ---
-materials = ["plastic", "metal", "glass", "general"]
-item_types = ["cans", "bottles"] # matching your state keys
+material_types = {
+    "plastic": ["bottles"],
+    "metal": ["cans", "bottles"],
+    "glass": ["bottles"],
+    "general": ["cans", "bottles"],
+    "tetra": ["cartons"]
+}
 
 client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
 
@@ -20,9 +25,10 @@ try:
 
     while True:
         # 1. Generate random defaulted data
+        material = random.choice(list(material_types.keys()))
         payload = {
-            "material": random.choice(materials),
-            "type": random.choice(item_types),
+            "material": material,
+            "type": random.choice(material_types[material]),
             "weight": f"{random.randint(10, 250)}g"
         }
 
