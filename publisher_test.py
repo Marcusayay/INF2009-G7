@@ -13,7 +13,7 @@ material_types = {
     "plastic": ["bottles"],
     "metal": ["cans", "bottles"],
     "glass": ["bottles"],
-    "general": ["cans", "bottles"],
+    "general": ["cans", "bottles", "others"],
     "tetra": ["cartons"]
 }
 
