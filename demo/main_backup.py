@@ -17,14 +17,6 @@ import paho.mqtt.client as mqtt
 # resolve correctly regardless of where the script is launched from.
 os.chdir(os.path.dirname(os.path.abspath(__file__)))
 
-import subprocess
-subprocess.run(["v4l2-ctl", "--set-ctrl=auto_exposure=1"],               check=False)
-subprocess.run(["v4l2-ctl", "--set-ctrl=exposure_time_absolute=25"],      check=False)
-subprocess.run(["v4l2-ctl", "--set-ctrl=brightness=255"],                 check=False)
-subprocess.run(["v4l2-ctl", "--set-ctrl=gain=200"],                       check=False)
-subprocess.run(["v4l2-ctl", "--set-ctrl=white_balance_automatic=0"],      check=False)
-subprocess.run(["v4l2-ctl", "--set-ctrl=white_balance_temperature=6500"], check=False)
-
 # =============================================================================
 # NOTE: setMouseCallback is NOT used anywhere in this file.
 # Qt-backed OpenCV builds on Pi OS fail to create window handles synchronously,
@@ -60,10 +52,10 @@ class Material(Enum):
     GENERAL_WASTE = "GENERAL_WASTE"
 
 class Compartment(Enum):
-    METAL         = 220
-    GLASS         = 290
-    PLASTIC       = 65
-    GENERAL_WASTE = 120
+    METAL         = 37
+    GLASS         = 100
+    PLASTIC       = 222
+    GENERAL_WASTE = 293
 
 MATERIAL_TO_COMPARTMENT: dict[Material, Compartment] = {
     Material.METAL:         Compartment.METAL,
@@ -164,7 +156,7 @@ current_speed_20   = -1.0
 target_angle_20    = None
 outbound_direction = None
 is_homing          = False
-HOME_ANGLE         = 85
+HOME_ANGLE         = 293
 calibration_mode   = False
 
 _latest_frame = None
@@ -177,29 +169,30 @@ center_x, center_y = 169, 113
 # 1b. CAMERAS
 #
 #   cap_tracking  (index 0) — servo tracking daemon, 320×240
-#   cap_vision    (index 2) — MobileNet inference,   640×480
+#   cap_vision    (index 1) — MobileNet inference,   640×480
+#
+# Two completely separate VideoCapture objects — neither path blocks the other.
+# Adjust VISION_CAM_INDEX if your second camera appears at a different index.
 # =============================================================================
 
 # -- Tracking camera (rotation arm) --
 cap_tracking = cv2.VideoCapture(0)
 cap_tracking.set(cv2.CAP_PROP_FRAME_WIDTH,  320)
 cap_tracking.set(cv2.CAP_PROP_FRAME_HEIGHT, 240)
-cap_tracking.set(cv2.CAP_PROP_BUFFERSIZE,   1)
-cap_tracking.set(cv2.CAP_PROP_AUTO_EXPOSURE, 1)
-cap_tracking.set(cv2.CAP_PROP_EXPOSURE,     -5)
+cap_tracking.set(cv2.CAP_PROP_BUFFERSIZE, 1)
 if not cap_tracking.isOpened():
     print("[ERROR] Cannot open tracking camera (index 0). Check /dev/video0.")
     sys.exit(1)
 
 # -- Vision camera (object classification) --
-VISION_CAM_INDEX = 2
+VISION_CAM_INDEX = 2          # change to 2 etc. if needed
 cap_vision = cv2.VideoCapture(VISION_CAM_INDEX)
 cap_vision.set(cv2.CAP_PROP_FRAME_WIDTH,  640)
 cap_vision.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
 cap_vision.set(cv2.CAP_PROP_BUFFERSIZE, 1)
 if not cap_vision.isOpened():
     print(f"[ERROR] Cannot open vision camera (index {VISION_CAM_INDEX}). "
-          "Check /dev/video2.")
+          "Check /dev/video1.")
     sys.exit(1)
 
 
@@ -207,15 +200,19 @@ if not cap_vision.isOpened():
 # 1c. VISION MODEL — loaded once at startup, shared by path_1_vision_model()
 # =============================================================================
 
+# Crop & model params — kept identical to detect.py
 VISION_FRAME_W, VISION_FRAME_H = 640, 480
 VISION_CAPTURE_BOX_SIZE        = 320
 VISION_MODEL_INPUT_SIZE        = 224
 VISION_QUANTIZED               = True
 
+# Detection thresholds — kept identical to detect.py
 VISION_BUFFER_THRESHOLD = 10
 VISION_FREQ_THRESHOLD   = 7
 VISION_CONF_THRESHOLD   = 0.89
-VISION_TIMEOUT_S        = 15.0
+
+# Hard timeout: give up waiting for a confident detection after this many seconds
+VISION_TIMEOUT_S = 15.0
 
 print("[VISION] Loading MobileNet model...")
 latest_model_path = return_latest_version_path("mobilenet")
@@ -238,10 +235,11 @@ else:
 # 1d. MQTT — publishes one message per classification cycle
 # =============================================================================
 
-MQTT_BROKER = "10.127.71.107"
+MQTT_BROKER = "10.127.71.107"   # change to your broker IP if needed
 MQTT_PORT   = 1883
 MQTT_TOPIC  = "pi/raw_transaction"
 
+# Maps the internal Material enum to the lowercase string the dashboard expects
 _MATERIAL_TO_MQTT = {
     Material.METAL:         "metal",
     Material.GLASS:         "glass",
@@ -273,12 +271,20 @@ mqtt_client.on_disconnect = _mqtt_on_disconnect
 
 try:
     mqtt_client.connect(MQTT_BROKER, MQTT_PORT, keepalive=60)
-    mqtt_client.loop_start()
+    mqtt_client.loop_start()   # background thread handles ping / reconnect
     print(f"[MQTT]  Connecting to {MQTT_BROKER}:{MQTT_PORT} ...")
 except Exception as e:
     print(f"[MQTT]  WARNING: Could not connect to broker ({e}). Publishing will be skipped.")
 
 def mqtt_publish_result(final_material, vision_label, weight_g):
+    """
+    Publish one classification result to MQTT.
+
+    Payload matches publisher_test.py structure:
+        { "material": "plastic", "type": "bottle", "weight": "123.0g" }
+
+    'type' comes from the vision model's predicted class name (e.g. 'bottle', 'can').
+    """
     payload = {
         "material": _MATERIAL_TO_MQTT.get(final_material, "general"),
         "type":     vision_label.lower(),
@@ -290,83 +296,6 @@ def mqtt_publish_result(final_material, vision_label, weight_g):
         print(f"[MQTT]  Published → {payload}")
     except Exception as e:
         print(f"[MQTT]  Publish failed: {e}")
-
-
-# =============================================================================
-# 1e. ARUCO MARKER — tracking daemon & compartment calibration
-#
-#   Mirrors servo_Controller.py exactly:
-#     - 320×240 capture, detect on 640×480 (2× upscale)
-#     - CLAHE for local contrast boost under UV lighting
-#     - Frame skip: detector runs every DETECT_EVERY_N frames,
-#       last known angle held in between
-#     - Direction-reversal stop inside decel zone (servo_Controller.py logic)
-#     - Angle from marker orientation only — no center_x/y required
-# =============================================================================
-_aruco_dict   = cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_4X4_50)
-_aruco_params = cv2.aruco.DetectorParameters()
-
-_aruco_params.adaptiveThreshWinSizeMin       = 3
-_aruco_params.adaptiveThreshWinSizeMax       = 21
-_aruco_params.adaptiveThreshWinSizeStep      = 2
-_aruco_params.minMarkerPerimeterRate         = 0.1
-_aruco_params.maxMarkerPerimeterRate         = 0.5
-_aruco_params.errorCorrectionRate            = 1.0
-_aruco_params.cornerRefinementMethod         = cv2.aruco.CORNER_REFINE_SUBPIX
-_aruco_params.cornerRefinementWinSize        = 5
-_aruco_params.cornerRefinementMaxIterations  = 30
-_aruco_params.polygonalApproxAccuracyRate    = 0.05
-_aruco_params.minCornerDistanceRate          = 0.03
-_aruco_params.minDistanceToBorder            = 1
-
-_aruco_detector = cv2.aruco.ArucoDetector(_aruco_dict, _aruco_params)
-
-ARUCO_UPSCALE    = 2
-DETECT_EVERY_N   = 2    # run detector every N frames, hold last result in between
-TRACKING_TIMEOUT = 2.0  # seconds before watchdog stops motor on marker loss
-
-_daemon_frame_ctr  = 0
-_last_good_corners = None
-
-
-def _aruco_preprocess(frame):
-    """2× upscale → grayscale → CLAHE. Local contrast boost, UV-friendly."""
-    big   = cv2.resize(frame, None, fx=ARUCO_UPSCALE, fy=ARUCO_UPSCALE,
-                       interpolation=cv2.INTER_LINEAR)
-    gray  = cv2.cvtColor(big, cv2.COLOR_BGR2GRAY)
-    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
-    return clahe.apply(gray)
-
-
-def detect_aruco_angle(frame):
-    """
-    Returns the arm angle purely from the marker's own orientation.
-    Top edge points toward the rotation centre, so the bottom→top
-    vector IS the inward direction — no center_x/y required.
-
-    Detection runs on a 2× upscaled + CLAHE image.
-    All returned corner coordinates are in original (320×240) frame space.
-
-    Returns:
-        (angle_degrees, marker_corners)  — or  (None, None) if not found.
-    """
-    gray = _aruco_preprocess(frame)
-    corners, ids, _ = _aruco_detector.detectMarkers(gray)
-    if ids is None or len(ids) == 0:
-        return None, None
-
-    c = corners[0][0] / ARUCO_UPSCALE   # TL, TR, BR, BL in original coords
-
-    top_x    = (c[0][0] + c[1][0]) / 2
-    top_y    = (c[0][1] + c[1][1]) / 2
-    bottom_x = (c[2][0] + c[3][0]) / 2
-    bottom_y = (c[2][1] + c[3][1]) / 2
-
-    dx    = top_x - bottom_x
-    dy    = top_y - bottom_y
-    angle = math.degrees(math.atan2(-dy, dx)) % 360
-
-    return angle, c
 
 
 # =============================================================================
@@ -429,11 +358,13 @@ def _set_target(angle):
     print(f"[TARGET] Set → {target_angle_20:.1f}°  "
           f"direction={'CCW' if outbound_direction == SPEED_BWD else 'CW'}")
 
+
 # =============================================================================
 # 4. WEIGHT HELPERS
 # =============================================================================
 
 def _iqr_clean(vals: list) -> list:
+    """Drop outliers via 1.5×IQR rule, then return the clean cluster."""
     if len(vals) < 4:
         return vals
     s   = sorted(vals)
@@ -462,7 +393,7 @@ def get_weight() -> float:
     vals = hx.get_raw_data(20)
     if not vals:
         return 0.0
-    clean = _iqr_clean(vals)
+    clean  = _iqr_clean(vals)
     return (sum(clean) / len(clean) - OFFSET) / RATIO
 
 
@@ -471,6 +402,14 @@ def get_weight() -> float:
 # =============================================================================
 
 def is_contaminated(material: Material, weight: float) -> bool:
+    """
+    Returns True if the object should be routed to General Waste.
+
+    Metal         — contaminated if weight exceeds METAL_CONTAMINATION_WEIGHT_LIMIT.
+    Glass/Plastic — contaminated if the break-beam sensor is triggered
+                    (beam broken = liquid/water detected inside the container).
+    General Waste — never re-evaluated; passes through as-is.
+    """
     print(f"[CONTAM] Checking {material.value}  weight={weight:.1f} g  "
           f"beam={'BROKEN' if beam_sensor.is_pressed else 'CLEAR'}")
 
@@ -640,19 +579,13 @@ def _spec_scan_and_classify(pp, gp, samples=SPEC_SCAN_SAMPLES):
 
 # =============================================================================
 # 7. SERVO TRACKING DAEMON  (uses cap_tracking — camera index 0)
-#
-#   Frame-skip logic mirrors servo_Controller.py:
-#     - Detector runs every DETECT_EVERY_N frames
-#     - On skip frames: hold last known angle (arm can't jump far between frames)
-#     - Direction-reversal guard inside decel zone stops motor cleanly
-#     - Watchdog fires after TRACKING_TIMEOUT seconds of true marker loss
 # =============================================================================
 
 def servo_tracking_daemon():
     global current_angle_20, target_angle_20, outbound_direction, is_homing
-    global _latest_frame, _daemon_frame_ctr, _last_good_corners
+    global _latest_frame
 
-    last_marker_seen = time.time()
+    last_tape_seen   = time.time()
     _last_log_time   = 0.0
     _last_tape_state = None
 
@@ -665,36 +598,46 @@ def servo_tracking_daemon():
         with _frame_lock:
             _latest_frame = frame.copy()
 
-        # --- Frame-skip detection (mirrors servo_Controller.py) --------------
-        _daemon_frame_ctr += 1
-        if _daemon_frame_ctr % DETECT_EVERY_N == 0:
-            detected_angle, aruco_corners = detect_aruco_angle(frame)
-            if aruco_corners is not None:
-                _last_good_corners = aruco_corners
-        else:
-            # Hold last known angle between detections
-            detected_angle = current_angle_20 \
-                if (time.time() - last_marker_seen) < TRACKING_TIMEOUT else None
-            aruco_corners  = _last_good_corners
+        corrected = correct_frame(frame)
+        hsv   = cv2.cvtColor(corrected, cv2.COLOR_BGR2HSV)
+        mask1 = cv2.inRange(hsv, np.array([0, 80, 45]),   np.array([10,  255, 90]))
+        mask2 = cv2.inRange(hsv, np.array([170, 80, 45]), np.array([179, 255, 90]))
+        mask  = mask1 | mask2
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+        mask   = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
 
-        marker_found = detected_angle is not None
+        contours, _ = cv2.findContours(mask, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
 
-        if marker_found:
-            last_marker_seen = time.time()
-            current_angle_20 = detected_angle
+        tape_found = False
+        tape_area  = 0
+        if contours:
+            largest   = max(contours, key=cv2.contourArea)
+            tape_area = cv2.contourArea(largest)
+            if tape_area > 250:
+                tape_found     = True
+                last_tape_seen = time.time()
+                tip_x, tip_y   = max(
+                    (pt[0] for pt in largest),
+                    key=lambda p: (p[0] - center_x) ** 2 + (p[1] - center_y) ** 2
+                )
+                current_angle_20 = math.degrees(
+                    math.atan2(center_y - tip_y, tip_x - center_x)
+                ) % 360
 
-        if marker_found != _last_tape_state:
-            _last_tape_state = marker_found
+        if tape_found != _last_tape_state:
+            if tape_found:
+                print(f"[DAEMON] Tape ACQUIRED  area={tape_area:.0f}  "
+                      f"angle={current_angle_20:.1f}°")
+            else:
+                print(f"[DAEMON] Tape LOST  (largest_area={tape_area:.0f})")
+            _last_tape_state = tape_found
 
-        # --- Watchdog --------------------------------------------------------
-        if not marker_found:
-            elapsed = time.time() - last_marker_seen
-            if elapsed > TRACKING_TIMEOUT and target_angle_20 is not None:
-                print(f"[DAEMON] Marker lost {elapsed:.1f} s — stopping motor")
-                set_speed_20(SPEED_STOP)
+        if not tape_found and (time.time() - last_tape_seen) > 2.0 \
+                and target_angle_20 is not None:
+            print("[DAEMON] Tape lost >2 s with active target — stopping motor")
+            set_speed_20(SPEED_STOP)
 
-        # --- Motor control ---------------------------------------------------
-        if target_angle_20 is not None and marker_found:
+        if target_angle_20 is not None and tape_found:
             diff = shortest_angle_diff(current_angle_20, target_angle_20)
             dist = abs(diff)
 
@@ -719,7 +662,7 @@ def servo_tracking_daemon():
                     print("[ARM]    Tilting down...")
                     set_angle_instant_21(0)
                     time.sleep(1.0)
-                    print(f"[DAEMON] Starting HOME sequence → {HOME_ANGLE}°")
+                    print(f"[DAEMON] Starting HOME sequence → {HOME_ANGLE}°  direction=CCW")
                     came_from_general_waste = (
                         abs(current_angle_20 - float(Compartment.GENERAL_WASTE.value))
                         <= ANGLE_TOLERANCE
@@ -736,7 +679,7 @@ def servo_tracking_daemon():
                     outbound_direction = None
                     is_homing          = False
             else:
-                    set_speed_20(decelerated_speed(outbound_direction, dist))
+                set_speed_20(decelerated_speed(outbound_direction, dist))
 
         time.sleep(0.01)
 
@@ -766,7 +709,7 @@ def calibrate_center_point():
     print("=" * 60)
 
     while True:
-        ret, frame = cap_tracking.read()
+        ret, frame = cap_tracking.read()   # calibration reads from tracking camera
         if not ret:
             cv2.waitKey(30)
             continue
@@ -847,23 +790,38 @@ def calibrate_compartment_angles():
             disp = frame.copy()
             h, w = disp.shape[:2]
 
-            detected_angle, aruco_corners = detect_aruco_angle(frame)
-            tape_vis = detected_angle is not None
-            if tape_vis:
-                cv2.polylines(disp, [aruco_corners.astype(int)], True, (0, 230, 255), 2)
-                c     = aruco_corners
-                top_x = int((c[0][0] + c[1][0]) / 2)
-                top_y = int((c[0][1] + c[1][1]) / 2)
-                bot_x = int((c[2][0] + c[3][0]) / 2)
-                bot_y = int((c[2][1] + c[3][1]) / 2)
-                cv2.arrowedLine(disp, (bot_x, bot_y), (top_x, top_y),
-                                (0, 255, 0), 2, tipLength=0.3)
+            _draw_crosshair(disp, center_x, center_y, (0, 255, 60), r=6)
+
+            corrected = correct_frame(frame)
+            hsv   = cv2.cvtColor(corrected, cv2.COLOR_BGR2HSV)
+            mask1 = cv2.inRange(hsv, np.array([0, 80, 45]),   np.array([10,  255, 90]))
+            mask2 = cv2.inRange(hsv, np.array([170, 80, 45]), np.array([179, 255, 90]))
+            mask  = mask1 | mask2
+            kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+            mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
+            conts, _ = cv2.findContours(mask, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
+            tape_vis = False
+            if conts:
+                largest = max(conts, key=cv2.contourArea)
+                if cv2.contourArea(largest) > 250:
+                    tape_vis = True
+                    tip = max(
+                        (pt[0] for pt in largest),
+                        key=lambda p: (p[0] - center_x) ** 2 + (p[1] - center_y) ** 2
+                    )
+                    cv2.circle(disp, tuple(tip), 7, (0, 0, 220), -1)
+                    cv2.line(disp, (center_x, center_y), tuple(tip), (0, 230, 255), 2)
+
+            rad = math.radians(target)
+            ex  = int(center_x + 75 * math.cos(rad))
+            ey  = int(center_y - 75 * math.sin(rad))
+            cv2.arrowedLine(disp, (center_x, center_y), (ex, ey), color, 2, tipLength=0.25)
 
             _put_lines(disp, [
                 f"STEP 2/3 — {material.value}  [{idx+1}/4]",
                 f"Target : {target:6.1f} deg",
                 f"Current: {current_angle_20:6.1f} deg",
-                f"Marker : {'OK' if tape_vis else 'NOT DETECTED'}",
+                f"Tape   : {'OK' if tape_vis else 'NOT DETECTED'}",
             ])
             cv2.putText(disp, "D/A=+/-1  C/Z=+/-5  SPACE=confirm",
                         (5, h - 6), cv2.FONT_HERSHEY_SIMPLEX, 0.37,
@@ -947,17 +905,43 @@ def calibrate_spectrometer():
 
 # =============================================================================
 # 11a. SENSOR FUSION
+#
+# Edit ONLY this function to change how vision + material + weight are combined
+# into a final routing decision. The pipeline just calls fuse_results() and
+# acts on what it returns — nothing else needs to change.
+#
+# Inputs:
+#   vision_label    (str)      — class name from the vision model, e.g. "bottle"
+#   material        (Material) — material type from sensors (inductive / spectrometer)
+#   weight_g        (float)    — measured weight in grams
+#
+# Returns:
+#   final_material  (Material) — the material that will be routed to its compartment
 # =============================================================================
 
 def fuse_results(vision_label: str, material: Material, weight_g: float) -> Material:
+    """
+    Decide the final material category given all sensor inputs.
+
+    Current logic (simple contamination gate):
+      1. Run the contamination check for the sensor-detected material.
+      2. If contaminated → route to GENERAL_WASTE regardless of vision.
+      3. Otherwise      → trust the sensor material as-is.
+
+    To change fusion behaviour (e.g. use vision to override sensor, add
+    confidence weighting, introduce new rules), edit only this function.
+    """
     print(f"[FUSION] vision={vision_label}  material={material.value}  weight={weight_g:.1f} g")
 
+    # --- Contamination gate ---
     if is_contaminated(material, weight_g):
         print(f"[FUSION] ✗ Contaminated → GENERAL_WASTE")
         return Material.GENERAL_WASTE
 
+    # --- Current rule: sensor material wins ---
     print(f"[FUSION] ✓ Clean → {material.value}")
     return material
+
 
 
 # =============================================================================
@@ -965,18 +949,33 @@ def fuse_results(vision_label: str, material: Material, weight_g: float) -> Mate
 # =============================================================================
 
 def path_1_vision_model() -> str:
+    """
+    Runs MobileNet inference on the dedicated vision camera (cap_vision, index 1).
+
+    Mirrors the buffer loop from detect.py exactly:
+      - Captures frames directly from cap_vision (640×480)
+      - Crops a centred VISION_CAPTURE_BOX_SIZE square, resizes to 224×224
+      - Rolling window of VISION_BUFFER_THRESHOLD frames
+      - Triggers when dominant class appears ≥ VISION_FREQ_THRESHOLD times
+        AND its average confidence ≥ VISION_CONF_THRESHOLD
+      - Falls back to best available class after VISION_TIMEOUT_S seconds
+
+    Returns the predicted class name string.
+    """
     print(f"[PATH 1] Starting vision inference on camera index {VISION_CAM_INDEX}...")
 
     buffer      = []
     frame_count = 0
     t_start     = time.perf_counter()
 
+    # Centred crop coordinates — computed once for the 640×480 source frame
     startx = VISION_FRAME_W  // 2 - VISION_CAPTURE_BOX_SIZE // 2
     starty = VISION_FRAME_H  // 2 - VISION_CAPTURE_BOX_SIZE // 2
 
     while True:
         elapsed = time.perf_counter() - t_start
 
+        # ---- Timeout fallback ------------------------------------------------
         if elapsed >= VISION_TIMEOUT_S:
             if buffer:
                 ids    = [x[0] for x in buffer]
@@ -993,6 +992,7 @@ def path_1_vision_model() -> str:
             print(f"\n[PATH 1] ⚠ Timeout with empty buffer — returning 'unknown'")
             return "unknown"
 
+        # ---- Capture from vision camera --------------------------------------
         ret, frame = cap_vision.read()
         if not ret:
             time.sleep(0.01)
@@ -1000,11 +1000,13 @@ def path_1_vision_model() -> str:
 
         frame_count += 1
 
+        # ---- Preprocess (identical to detect.py) ----------------------------
         roi         = frame[starty:starty + VISION_CAPTURE_BOX_SIZE,
                             startx:startx + VISION_CAPTURE_BOX_SIZE]
         roi_resized = cv2.resize(roi, (VISION_MODEL_INPUT_SIZE, VISION_MODEL_INPUT_SIZE))
         img         = cv2.cvtColor(roi_resized, cv2.COLOR_BGR2RGB)
 
+        # ---- Inference -------------------------------------------------------
         class_id, confidence, inf_time_ms, probabilities = run_inference(
             quantized=VISION_QUANTIZED,
             inference_engine=vision_model,
@@ -1013,6 +1015,7 @@ def path_1_vision_model() -> str:
             img_crop=img,
         )
 
+        # ---- Rolling buffer --------------------------------------------------
         buffer.append((class_id, confidence, probabilities))
         if len(buffer) > VISION_BUFFER_THRESHOLD:
             buffer.pop(0)
@@ -1022,6 +1025,7 @@ def path_1_vision_model() -> str:
         print(f"[PATH 1] Frame {frame_count:4d} | {label_now:<20} {confidence:.2f}",
               end="\r")
 
+        # ---- Evaluate buffer -------------------------------------------------
         if len(buffer) == VISION_BUFFER_THRESHOLD:
             ids    = [x[0] for x in buffer]
             counts = Counter(ids)
@@ -1115,7 +1119,7 @@ def main_pipeline():
     hx.reset()
     tare_scale()
 
-    # calibrate_center_point()
+    calibrate_center_point()
 
     threading.Thread(target=servo_tracking_daemon, daemon=True).start()
     time.sleep(0.4)
