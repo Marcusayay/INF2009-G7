@@ -9,6 +9,21 @@ import RPi.GPIO as GPIO
 import concurrent.futures
 import threading
 from enum import Enum
+from collections import Counter
+
+import paho.mqtt.client as mqtt
+
+# Ensure all relative paths (mobnet_models/, calibration.json, etc.)
+# resolve correctly regardless of where the script is launched from.
+os.chdir(os.path.dirname(os.path.abspath(__file__)))
+
+import subprocess
+subprocess.run(["v4l2-ctl", "--set-ctrl=auto_exposure=1"],               check=False)
+subprocess.run(["v4l2-ctl", "--set-ctrl=exposure_time_absolute=25"],      check=False)
+subprocess.run(["v4l2-ctl", "--set-ctrl=brightness=255"],                 check=False)
+subprocess.run(["v4l2-ctl", "--set-ctrl=gain=200"],                       check=False)
+subprocess.run(["v4l2-ctl", "--set-ctrl=white_balance_automatic=0"],      check=False)
+subprocess.run(["v4l2-ctl", "--set-ctrl=white_balance_temperature=6500"], check=False)
 
 # =============================================================================
 # NOTE: setMouseCallback is NOT used anywhere in this file.
@@ -22,6 +37,17 @@ from gpiozero import DigitalInputDevice, Button
 from hx711 import HX711
 from as7343 import AS7343
 
+# --- Vision Model Imports ---
+from mobileNet_helpers import run_inference, load_model
+from pick_model import return_latest_version_path
+
+try:
+    from monitoring import track_ram, track_temp, track_power, returns_latest_file_number
+except ImportError:
+    track_ram   = lambda: 0.0
+    track_temp  = lambda: 0.0
+    track_power = lambda: 0.0
+
 
 # =============================================================================
 # 0. ENUMS
@@ -34,12 +60,11 @@ class Material(Enum):
     GENERAL_WASTE = "GENERAL_WASTE"
 
 class Compartment(Enum):
-    METAL         = 37
-    GLASS         = 100
-    PLASTIC       = 222
-    GENERAL_WASTE = 293
+    METAL         = 220
+    GLASS         = 290
+    PLASTIC       = 65
+    GENERAL_WASTE = 120
 
-# Maps each material to its target compartment angle (degrees)
 MATERIAL_TO_COMPARTMENT: dict[Material, Compartment] = {
     Material.METAL:         Compartment.METAL,
     Material.GLASS:         Compartment.GLASS,
@@ -49,7 +74,7 @@ MATERIAL_TO_COMPARTMENT: dict[Material, Compartment] = {
 
 
 # =============================================================================
-# COLOR CORRECTION — counteracts purple UV lighting
+# COLOR CORRECTION — counteracts purple UV lighting (tracking camera only)
 # =============================================================================
 
 _CORRECTION_LUT_B = None
@@ -58,7 +83,7 @@ _CORRECTION_LUT_R = None
 
 
 def correct_frame(frame):
-    """White-balance correction: neutralises purple UV cast so green tape reads as green."""
+    """White-balance correction for the tracking camera's UV cast."""
     global _CORRECTION_LUT_B, _CORRECTION_LUT_G, _CORRECTION_LUT_R
     if _CORRECTION_LUT_B is None:
         _CORRECTION_LUT_B = np.array([min(255, int(i * 0.457)) for i in range(256)], dtype=np.uint8)
@@ -82,16 +107,15 @@ RATIO  = 492.22
 OFFSET = 0
 WEIGHT_TRIGGER_THRESHOLD = 5.0
 
-# Metal contamination: reject if too heavy (e.g. not a beverage can)
 METAL_CONTAMINATION_WEIGHT_LIMIT = 500.0
 
 # -- Inductive Sensor (SN04-N) --
 PIN_INDUCTIVE = 16
 metal_sensor  = DigitalInputDevice(PIN_INDUCTIVE, pull_up=True)
 
-# -- Break Beam Sensor (water-level / liquid contamination for Glass & Plastic) --
-# Pin 26, pull_up=True: beam intact → pin HIGH (is_pressed=False)
-#                       beam broken → pin LOW  (is_pressed=True)  ← contaminated
+# -- Break Beam Sensor --
+# beam intact → pin HIGH (is_pressed=False)
+# beam broken → pin LOW  (is_pressed=True)  ← contaminated
 PIN_BEAM    = 26
 beam_sensor = Button(PIN_BEAM, pull_up=True)
 
@@ -130,8 +154,8 @@ pwm21 = GPIO.PWM(PIN_21, 50)
 pwm21.start(0)
 
 MOTOR_DIRECTION_SIGN                             = 1
-SPEED_BWD, SPEED_FWD, SPEED_NEUTRAL, SPEED_STOP = 8.5, 6.5, 7.5, 0
-DECEL_START, DECEL_NEAR, CRAWL_FACTOR            = 60, 25, 0.5
+SPEED_BWD, SPEED_FWD, SPEED_NEUTRAL, SPEED_STOP = 9.0, 6.0, 7.5, 0
+DECEL_START, DECEL_NEAR, CRAWL_FACTOR            = 60, 25,1 
 ANGLE_TOLERANCE                                  = 12
 
 last_angle_21      = -1
@@ -140,7 +164,7 @@ current_speed_20   = -1.0
 target_angle_20    = None
 outbound_direction = None
 is_homing          = False
-HOME_ANGLE         = 293
+HOME_ANGLE         = 85
 calibration_mode   = False
 
 _latest_frame = None
@@ -148,13 +172,201 @@ _frame_lock   = threading.Lock()
 
 center_x, center_y = 169, 113
 
-# -- Camera --
-cap = cv2.VideoCapture(0)
-cap.set(cv2.CAP_PROP_FRAME_WIDTH,  320)
-cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 240)
-if not cap.isOpened():
-    print("[ERROR] Cannot open camera. Check /dev/video0.")
+
+# =============================================================================
+# 1b. CAMERAS
+#
+#   cap_tracking  (index 0) — servo tracking daemon, 320×240
+#   cap_vision    (index 2) — MobileNet inference,   640×480
+# =============================================================================
+
+# -- Tracking camera (rotation arm) --
+cap_tracking = cv2.VideoCapture(0)
+cap_tracking.set(cv2.CAP_PROP_FRAME_WIDTH,  320)
+cap_tracking.set(cv2.CAP_PROP_FRAME_HEIGHT, 240)
+cap_tracking.set(cv2.CAP_PROP_BUFFERSIZE,   1)
+cap_tracking.set(cv2.CAP_PROP_AUTO_EXPOSURE, 1)
+cap_tracking.set(cv2.CAP_PROP_EXPOSURE,     -5)
+if not cap_tracking.isOpened():
+    print("[ERROR] Cannot open tracking camera (index 0). Check /dev/video0.")
     sys.exit(1)
+
+# -- Vision camera (object classification) --
+VISION_CAM_INDEX = 2
+cap_vision = cv2.VideoCapture(VISION_CAM_INDEX)
+cap_vision.set(cv2.CAP_PROP_FRAME_WIDTH,  640)
+cap_vision.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+cap_vision.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+if not cap_vision.isOpened():
+    print(f"[ERROR] Cannot open vision camera (index {VISION_CAM_INDEX}). "
+          "Check /dev/video2.")
+    sys.exit(1)
+
+
+# =============================================================================
+# 1c. VISION MODEL — loaded once at startup, shared by path_1_vision_model()
+# =============================================================================
+
+VISION_FRAME_W, VISION_FRAME_H = 640, 480
+VISION_CAPTURE_BOX_SIZE        = 320
+VISION_MODEL_INPUT_SIZE        = 224
+VISION_QUANTIZED               = True
+
+VISION_BUFFER_THRESHOLD = 10
+VISION_FREQ_THRESHOLD   = 7
+VISION_CONF_THRESHOLD   = 0.89
+VISION_TIMEOUT_S        = 15.0
+
+print("[VISION] Loading MobileNet model...")
+latest_model_path = return_latest_version_path("mobilenet")
+vision_model, vision_input_details, vision_output_details, _vision_model_path = load_model(
+    quantized=VISION_QUANTIZED,
+    model_path=latest_model_path,
+)
+
+labels_path = os.path.join(latest_model_path, "labels.txt")
+if os.path.exists(labels_path):
+    with open(labels_path, "r") as f:
+        CLASS_NAMES = [line.strip() for line in f.readlines()]
+    print(f"[VISION] Loaded class names: {CLASS_NAMES}")
+else:
+    CLASS_NAMES = []
+    print("[VISION] WARNING: labels.txt not found — class IDs will be used as names")
+
+
+# =============================================================================
+# 1d. MQTT — publishes one message per classification cycle
+# =============================================================================
+
+MQTT_BROKER = "10.127.71.107"
+MQTT_PORT   = 1883
+MQTT_TOPIC  = "pi/raw_transaction"
+
+_MATERIAL_TO_MQTT = {
+    Material.METAL:         "metal",
+    Material.GLASS:         "glass",
+    Material.PLASTIC:       "plastic",
+    Material.GENERAL_WASTE: "general",
+}
+
+mqtt_client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
+
+def _mqtt_on_connect(client, userdata, flags, reason_code, properties):
+    if reason_code == 0:
+        print(f"[MQTT]  Connected to broker {MQTT_BROKER}:{MQTT_PORT}")
+    else:
+        print(f"[MQTT]  Connection failed — reason code {reason_code}")
+
+def _mqtt_on_disconnect(client, userdata, flags, reason_code, properties):
+    print(f"[MQTT]  Disconnected (reason={reason_code}) — attempting reconnect...")
+    while True:
+        try:
+            client.reconnect()
+            print("[MQTT]  Reconnected.")
+            break
+        except Exception as e:
+            print(f"[MQTT]  Reconnect failed: {e}  — retrying in 5 s")
+            time.sleep(5)
+
+mqtt_client.on_connect    = _mqtt_on_connect
+mqtt_client.on_disconnect = _mqtt_on_disconnect
+
+try:
+    mqtt_client.connect(MQTT_BROKER, MQTT_PORT, keepalive=60)
+    mqtt_client.loop_start()
+    print(f"[MQTT]  Connecting to {MQTT_BROKER}:{MQTT_PORT} ...")
+except Exception as e:
+    print(f"[MQTT]  WARNING: Could not connect to broker ({e}). Publishing will be skipped.")
+
+def mqtt_publish_result(final_material, vision_label, weight_g):
+    payload = {
+        "material": _MATERIAL_TO_MQTT.get(final_material, "general"),
+        "type":     vision_label.lower(),
+        "weight":   f"{weight_g:.1f}g",
+    }
+    try:
+        result = mqtt_client.publish(MQTT_TOPIC, json.dumps(payload))
+        result.wait_for_publish(timeout=2.0)
+        print(f"[MQTT]  Published → {payload}")
+    except Exception as e:
+        print(f"[MQTT]  Publish failed: {e}")
+
+
+# =============================================================================
+# 1e. ARUCO MARKER — tracking daemon & compartment calibration
+#
+#   Mirrors servo_Controller.py exactly:
+#     - 320×240 capture, detect on 640×480 (2× upscale)
+#     - CLAHE for local contrast boost under UV lighting
+#     - Frame skip: detector runs every DETECT_EVERY_N frames,
+#       last known angle held in between
+#     - Direction-reversal stop inside decel zone (servo_Controller.py logic)
+#     - Angle from marker orientation only — no center_x/y required
+# =============================================================================
+_aruco_dict   = cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_4X4_50)
+_aruco_params = cv2.aruco.DetectorParameters()
+
+_aruco_params.adaptiveThreshWinSizeMin       = 3
+_aruco_params.adaptiveThreshWinSizeMax       = 21
+_aruco_params.adaptiveThreshWinSizeStep      = 2
+_aruco_params.minMarkerPerimeterRate         = 0.1
+_aruco_params.maxMarkerPerimeterRate         = 0.5
+_aruco_params.errorCorrectionRate            = 1.0
+_aruco_params.cornerRefinementMethod         = cv2.aruco.CORNER_REFINE_SUBPIX
+_aruco_params.cornerRefinementWinSize        = 5
+_aruco_params.cornerRefinementMaxIterations  = 30
+_aruco_params.polygonalApproxAccuracyRate    = 0.05
+_aruco_params.minCornerDistanceRate          = 0.03
+_aruco_params.minDistanceToBorder            = 1
+
+_aruco_detector = cv2.aruco.ArucoDetector(_aruco_dict, _aruco_params)
+
+ARUCO_UPSCALE    = 2
+DETECT_EVERY_N   = 2    # run detector every N frames, hold last result in between
+TRACKING_TIMEOUT = 2.0  # seconds before watchdog stops motor on marker loss
+
+_daemon_frame_ctr  = 0
+_last_good_corners = None
+
+
+def _aruco_preprocess(frame):
+    """2× upscale → grayscale → CLAHE. Local contrast boost, UV-friendly."""
+    big   = cv2.resize(frame, None, fx=ARUCO_UPSCALE, fy=ARUCO_UPSCALE,
+                       interpolation=cv2.INTER_LINEAR)
+    gray  = cv2.cvtColor(big, cv2.COLOR_BGR2GRAY)
+    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+    return clahe.apply(gray)
+
+
+def detect_aruco_angle(frame):
+    """
+    Returns the arm angle purely from the marker's own orientation.
+    Top edge points toward the rotation centre, so the bottom→top
+    vector IS the inward direction — no center_x/y required.
+
+    Detection runs on a 2× upscaled + CLAHE image.
+    All returned corner coordinates are in original (320×240) frame space.
+
+    Returns:
+        (angle_degrees, marker_corners)  — or  (None, None) if not found.
+    """
+    gray = _aruco_preprocess(frame)
+    corners, ids, _ = _aruco_detector.detectMarkers(gray)
+    if ids is None or len(ids) == 0:
+        return None, None
+
+    c = corners[0][0] / ARUCO_UPSCALE   # TL, TR, BR, BL in original coords
+
+    top_x    = (c[0][0] + c[1][0]) / 2
+    top_y    = (c[0][1] + c[1][1]) / 2
+    bottom_x = (c[2][0] + c[3][0]) / 2
+    bottom_y = (c[2][1] + c[3][1]) / 2
+
+    dx    = top_x - bottom_x
+    dy    = top_y - bottom_y
+    angle = math.degrees(math.atan2(-dy, dx)) % 360
+
+    return angle, c
 
 
 # =============================================================================
@@ -211,15 +423,17 @@ def _set_target(angle):
     global target_angle_20, outbound_direction, is_homing
     target_angle_20    = float(angle) % 360
     is_homing          = False
-    outbound_direction = SPEED_BWD if target_angle_20 == float(Compartment.GENERAL_WASTE.value) else SPEED_FWD
-    print(f"[TARGET] Set → {target_angle_20:.1f}°  direction={'CCW' if outbound_direction == SPEED_BWD else 'CW'}")
-
+    outbound_direction = (SPEED_BWD
+                          if target_angle_20 == float(Compartment.GENERAL_WASTE.value)
+                          else SPEED_FWD)
+    print(f"[TARGET] Set → {target_angle_20:.1f}°  "
+          f"direction={'CCW' if outbound_direction == SPEED_BWD else 'CW'}")
 
 # =============================================================================
 # 4. WEIGHT HELPERS
 # =============================================================================
+
 def _iqr_clean(vals: list) -> list:
-    """Drop outliers via 1.5×IQR rule, then return the clean cluster."""
     if len(vals) < 4:
         return vals
     s   = sorted(vals)
@@ -228,12 +442,13 @@ def _iqr_clean(vals: list) -> list:
     iqr = q3 - q1
     lo, hi = q1 - 1.5 * iqr, q3 + 1.5 * iqr
     clean = [v for v in s if lo <= v <= hi]
-    return clean if clean else s   # never return empty
+    return clean if clean else s
+
 def tare_scale():
     global OFFSET
     print("[SCALE]  Taring — ensure platform is empty...")
     time.sleep(1)
-    vals = hx.get_raw_data(20)   # was 10
+    vals = hx.get_raw_data(20)
     if vals:
         clean   = _iqr_clean(vals)
         OFFSET  = int(sum(clean) / len(clean))
@@ -244,12 +459,11 @@ def tare_scale():
         print("[SCALE]  Tare FAILED — no data from HX711")
 
 def get_weight() -> float:
-    vals = hx.get_raw_data(20)   # was 5
+    vals = hx.get_raw_data(20)
     if not vals:
         return 0.0
-    clean  = _iqr_clean(vals)
-    weight = (sum(clean) / len(clean) - OFFSET) / RATIO
-    return weight
+    clean = _iqr_clean(vals)
+    return (sum(clean) / len(clean) - OFFSET) / RATIO
 
 
 # =============================================================================
@@ -257,14 +471,6 @@ def get_weight() -> float:
 # =============================================================================
 
 def is_contaminated(material: Material, weight: float) -> bool:
-    """
-    Returns True if the object should be routed to General Waste.
-
-    Metal         — contaminated if weight exceeds METAL_CONTAMINATION_WEIGHT_LIMIT.
-    Glass/Plastic — contaminated if the break-beam sensor is triggered
-                    (beam broken = liquid/water detected inside the container).
-    General Waste — never re-evaluated; passes through as-is.
-    """
     print(f"[CONTAM] Checking {material.value}  weight={weight:.1f} g  "
           f"beam={'BROKEN' if beam_sensor.is_pressed else 'CLEAR'}")
 
@@ -284,7 +490,6 @@ def is_contaminated(material: Material, weight: float) -> bool:
         print(f"[CONTAM] ✓ Beam CLEAR — {material.value} container is clean")
         return False
 
-    # General Waste: no further check needed
     print(f"[CONTAM] ✓ {material.value} — no contamination check required")
     return False
 
@@ -315,8 +520,7 @@ def _spec_get_fingerprint():
     if total < 1:
         print(f"[SPEC]   Total signal too low ({total:.1f}) — fingerprint rejected")
         return None
-    normalised = {k: v / total for k, v in combined.items()}
-    return normalised
+    return {k: v / total for k, v in combined.items()}
 
 def _spec_average(fps):
     keys = fps[0].keys()
@@ -326,12 +530,12 @@ def _spec_euclidean(a, b):
     common = set(a) & set(b)
     return math.sqrt(sum((a[k] - b[k]) ** 2 for k in common))
 
-def _spec_weighted_dist(scan_fp, profile):
-    mean, std = profile["mean"], profile["std"]
-    common    = set(scan_fp) & set(mean)
-    return math.sqrt(sum(
-        ((scan_fp[k] - mean[k]) / (std[k] + 1e-6)) ** 2 for k in common
-    ))
+# def _spec_weighted_dist(scan_fp, profile):
+#     mean, std = profile["mean"], profile["std"]
+#     common    = set(scan_fp) & set(mean)
+#     return math.sqrt(sum(
+#         ((scan_fp[k] - mean[k]) / (std[k] + 1e-6)) ** 2 for k in common
+#     ))
 
 def _spec_reject_outliers(fps):
     if len(fps) < 3:
@@ -397,58 +601,237 @@ def _spec_confidence(dp, dg, pp, gp):
     prox   = max(0.0, 1.0 - min(dp, dg) / spread)
     margin = min(1.0, abs(dp - dg) / spread)
     return (prox * 0.6 + margin * 0.4) * 100
+# =============================================================================
+# SPECTROMETER — UPDATED DISTANCE & CLASSIFICATION FUNCTIONS
+#
+# Drop these in as direct replacements for the following functions in main.py:
+#   - _spec_weighted_dist        → REMOVED (replaced by SAM + chi-squared)
+#   - _spec_confidence           → replaced by _spec_confidence_sam
+#   - _spec_scan_and_classify    → updated in-place
+#
+# Everything else (_spec_get_fingerprint, _spec_average, _spec_euclidean,
+# _spec_reject_outliers, _spec_calibrate_material, etc.) is unchanged.
+#
+# WHAT CHANGED AND WHY:
+#   Old: weighted Euclidean distance with 1/sigma per channel
+#        - treats channels as independent (wrong — adjacent bands correlate)
+#        - sensitive to absolute intensity shifts from placement variance
+#
+#   New: SAM (primary, 70%) + Chi-squared (secondary, 30%)
+#        - SAM measures the ANGLE between spectral vectors, so uniform
+#          brightness shifts from LED flicker or bad placement are ignored
+#        - Chi-squared down-weights noisy near-zero channels naturally
+#        - Both metrics work directly on the normalised fingerprints already
+#          produced by _spec_get_fingerprint — no extra calibration needed
+# =============================================================================
 
-def _spec_scan_and_classify(pp, gp, samples=SPEC_SCAN_SAMPLES) -> tuple[Material | None, float, dict]:
+import math
+import numpy as np
+
+
+# -----------------------------------------------------------------------------
+# DISTANCE METRICS
+# -----------------------------------------------------------------------------
+
+def _spec_sam(scan_fp: dict, profile_mean: dict) -> float:
+    """
+    Spectral Angle Mapper — returns angle in degrees between scan and profile.
+    Lower = closer match.  Range: [0, 90].
+
+    Completely invariant to uniform illumination scaling, making it robust
+    to LED intensity drift and inconsistent item placement height.
+    """
+    keys = set(scan_fp) & set(profile_mean)
+    va   = np.array([scan_fp[k]      for k in keys], dtype=float)
+    vb   = np.array([profile_mean[k] for k in keys], dtype=float)
+    norm = np.linalg.norm(va) * np.linalg.norm(vb)
+    if norm < 1e-9:
+        return 90.0  # degenerate — treat as maximally different
+    cos_theta = np.dot(va, vb) / norm
+    return float(np.degrees(np.arccos(np.clip(cos_theta, -1.0, 1.0))))
+
+
+def _spec_chi_squared(scan_fp: dict, profile_mean: dict) -> float:
+    """
+    Chi-squared distance between scan fingerprint and profile mean.
+    Lower = closer match.
+
+    Down-weights channels with low signal in both scan and profile,
+    so noisy near-zero channels don't dominate the decision.
+    """
+    keys = set(scan_fp) & set(profile_mean)
+    return float(sum(
+        (scan_fp[k] - profile_mean[k]) ** 2 / (scan_fp[k] + profile_mean[k] + 1e-9)
+        for k in keys
+    ))
+
+
+# -----------------------------------------------------------------------------
+# CONFIDENCE — replaces _spec_confidence
+# -----------------------------------------------------------------------------
+
+def _spec_confidence_sam(
+    sam_p: float, sam_g: float,
+    chi_p: float, chi_g: float,
+    pp_mean: dict, gp_mean: dict,
+) -> float:
+    """
+    Confidence score [0, 100] using SAM (70%) + chi-squared margin (30%).
+
+    SAM component:
+      - profile_sep  : angular distance between the two calibration means
+                       (how different plastic and glass look to the sensor)
+      - prox         : how close the scan is to the winning profile,
+                       relative to that separation  (0 = at the profile, 1 = far)
+      - sam_margin   : how decisively one profile beats the other
+
+    Chi-squared component:
+      - simple normalised margin — which metric agrees with SAM and by how much
+
+    Low confidence means the two profiles look similar in this environment
+    (poor sensor placement, contaminated reference, or sensor degradation).
+    """
+    # Angular separation between the two calibration profiles
+    profile_sep = _spec_sam(pp_mean, gp_mean)
+    if profile_sep < 0.1:           # profiles indistinguishable — can't be confident
+        return 0.0
+
+    winner_angle = min(sam_p, sam_g)
+
+    # Proximity: scan angle to winner, normalised by profile separation
+    prox       = max(0.0, 1.0 - winner_angle / profile_sep)
+
+    # SAM margin: decisiveness of the angle difference
+    sam_margin = min(1.0, abs(sam_p - sam_g) / profile_sep)
+
+    sam_conf   = prox * 0.6 + sam_margin * 0.4
+
+    # Chi-squared margin (normalised, direction-agnostic)
+    chi_total  = chi_p + chi_g + 1e-9
+    chi_margin = abs(chi_p - chi_g) / chi_total   # 0–1
+
+    combined   = (0.70 * sam_conf + 0.30 * chi_margin) * 100.0
+    return min(combined, 100.0)
+
+
+# -----------------------------------------------------------------------------
+# CLASSIFICATION — drop-in replacement for _spec_scan_and_classify
+# -----------------------------------------------------------------------------
+
+def _spec_scan_and_classify(pp, gp, samples=6):
+    """
+    Collect `samples` spectral fingerprints, reject outliers, average, then
+    classify as PLASTIC or GLASS using SAM (primary) + chi-squared (secondary).
+
+    Ensemble decision:
+      Each metric votes independently on normalised scores.  SAM carries 70%
+      of the weight; chi-squared carries 30%.  A lower combined score means
+      a better match.
+
+    Returns:
+        (Material or None,  confidence float,  debug dict)
+    """
+    from collections import namedtuple
+    # Import Material from the outer module — adjust if needed
+    from __main__ import Material, _spec_get_fingerprint, _spec_average, _spec_reject_outliers
+
     print(f"[SPEC]   Starting scan — collecting {samples} fingerprints...")
     fps = []
     for i in range(samples):
         fp = _spec_get_fingerprint()
         if fp:
             fps.append(fp)
-            print(f"[SPEC]   Sample {i+1}/{samples} collected  "
-                  f"(channels={len(fp)})")
+            print(f"[SPEC]   Sample {i+1}/{samples} collected  (channels={len(fp)})")
         else:
             print(f"[SPEC]   Sample {i+1}/{samples} FAILED — skipped")
-        time.sleep(0.08)
+        import time; time.sleep(0.08)
+
     print(f"[SPEC]   Raw collected: {len(fps)}/{samples}")
     if not fps:
         print("[SPEC]   No valid samples — classification aborted")
         return None, 0, {}
+
     clean, dropped = _spec_reject_outliers(fps)
     print(f"[SPEC]   After outlier rejection: {len(clean)} clean, {dropped} dropped")
     if not clean:
         print("[SPEC]   All samples rejected — classification aborted")
         return None, 0, {}
+
     scan = _spec_average(clean)
-    dp   = _spec_weighted_dist(scan, pp)
-    dg   = _spec_weighted_dist(scan, gp)
-    conf = _spec_confidence(dp, dg, pp, gp)
-    result = Material.PLASTIC if dp <= dg else Material.GLASS
-    winner = "PLASTIC" if dp <= dg else "GLASS"
-    loser  = "GLASS"   if dp <= dg else "PLASTIC"
-    margin = abs(dp - dg)
-    print(f"[SPEC]   d_plastic={dp:.4f}  d_glass={dg:.4f}  "
-          f"margin={margin:.4f}  confidence={conf:.1f}%")
-    print(f"[SPEC]   → {winner} wins over {loser}")
-    debug = {"d_plastic": dp, "d_glass": dg,
-             "samples_used": len(clean), "samples_dropped": dropped}
+
+    # --- SAM distances -------------------------------------------------------
+    sam_p = _spec_sam(scan, pp["mean"])
+    sam_g = _spec_sam(scan, gp["mean"])
+
+    # --- Chi-squared distances -----------------------------------------------
+    chi_p = _spec_chi_squared(scan, pp["mean"])
+    chi_g = _spec_chi_squared(scan, gp["mean"])
+
+    # --- Ensemble score (lower = better match) --------------------------------
+    # Normalise each metric so the two are on a common [0,1] scale before mixing
+    sam_total   = sam_p + sam_g + 1e-9
+    chi_total   = chi_p + chi_g + 1e-9
+
+    SAM_WEIGHT  = 0.70
+    CHI_WEIGHT  = 0.30
+
+    score_p = SAM_WEIGHT * (sam_p / sam_total) + CHI_WEIGHT * (chi_p / chi_total)
+    score_g = SAM_WEIGHT * (sam_g / sam_total) + CHI_WEIGHT * (chi_g / chi_total)
+
+    result  = Material.PLASTIC if score_p <= score_g else Material.GLASS
+    winner  = "PLASTIC" if score_p <= score_g else "GLASS"
+    loser   = "GLASS"   if score_p <= score_g else "PLASTIC"
+
+    # --- Confidence ----------------------------------------------------------
+    conf = _spec_confidence_sam(sam_p, sam_g, chi_p, chi_g, pp["mean"], gp["mean"])
+
+    # --- Logging -------------------------------------------------------------
+    profile_sep = _spec_sam(pp["mean"], gp["mean"])
+    print(
+        f"[SPEC]   SAM  → plastic={sam_p:.2f}°  glass={sam_g:.2f}°  "
+        f"profile_sep={profile_sep:.2f}°"
+    )
+    print(
+        f"[SPEC]   Chi² → plastic={chi_p:.4f}  glass={chi_g:.4f}"
+    )
+    print(
+        f"[SPEC]   Ensemble score → plastic={score_p:.4f}  glass={score_g:.4f}"
+    )
+    print(f"[SPEC]   → {winner} wins over {loser}  confidence={conf:.1f}%")
+
+    debug = {
+        "sam_plastic":     sam_p,
+        "sam_glass":       sam_g,
+        "chi_plastic":     chi_p,
+        "chi_glass":       chi_g,
+        "score_plastic":   score_p,
+        "score_glass":     score_g,
+        "profile_sep_deg": profile_sep,
+        "samples_used":    len(clean),
+        "samples_dropped": dropped,
+    }
     return result, conf, debug
 
-
 # =============================================================================
-# 7. SERVO TRACKING DAEMON
+# 7. SERVO TRACKING DAEMON  (uses cap_tracking — camera index 0)
+#
+#   Frame-skip logic mirrors servo_Controller.py:
+#     - Detector runs every DETECT_EVERY_N frames
+#     - On skip frames: hold last known angle (arm can't jump far between frames)
+#     - Direction-reversal guard inside decel zone stops motor cleanly
+#     - Watchdog fires after TRACKING_TIMEOUT seconds of true marker loss
 # =============================================================================
 
 def servo_tracking_daemon():
     global current_angle_20, target_angle_20, outbound_direction, is_homing
-    global _latest_frame
+    global _latest_frame, _daemon_frame_ctr, _last_good_corners
 
-    last_tape_seen   = time.time()
-    _last_log_time   = 0.0   # throttle — log tracking state at most once per second
-    _last_tape_state = None  # track transitions
+    last_marker_seen = time.time()
+    _last_log_time   = 0.0
+    _last_tape_state = None
 
     while True:
-        ret, frame = cap.read()
+        ret, frame = cap_tracking.read()
         if not ret:
             time.sleep(0.01)
             continue
@@ -456,51 +839,39 @@ def servo_tracking_daemon():
         with _frame_lock:
             _latest_frame = frame.copy()
 
-        corrected = correct_frame(frame)
-        hsv   = cv2.cvtColor(corrected, cv2.COLOR_BGR2HSV)
-        mask1 = cv2.inRange(hsv, np.array([0, 80, 45]), np.array([10, 255, 90]))
-        mask2 = cv2.inRange(hsv, np.array([170, 80, 45]), np.array([179, 255, 90]))
-        mask = mask1 | mask2
-        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
-        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
+        # --- Frame-skip detection (mirrors servo_Controller.py) --------------
+        _daemon_frame_ctr += 1
+        if _daemon_frame_ctr % DETECT_EVERY_N == 0:
+            detected_angle, aruco_corners = detect_aruco_angle(frame)
+            if aruco_corners is not None:
+                _last_good_corners = aruco_corners
+        else:
+            # Hold last known angle between detections
+            detected_angle = current_angle_20 \
+                if (time.time() - last_marker_seen) < TRACKING_TIMEOUT else None
+            aruco_corners  = _last_good_corners
 
-        contours, _ = cv2.findContours(mask, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
+        marker_found = detected_angle is not None
 
-        tape_found = False
-        tape_area  = 0
-        if contours:
-            largest   = max(contours, key=cv2.contourArea)
-            tape_area = cv2.contourArea(largest)
-            if tape_area > 250:
-                tape_found     = True
-                last_tape_seen = time.time()
-                tip_x, tip_y   = max(
-                    (pt[0] for pt in largest),
-                    key=lambda p: (p[0] - center_x) ** 2 + (p[1] - center_y) ** 2
-                )
-                current_angle_20 = math.degrees(
-                    math.atan2(center_y - tip_y, tip_x - center_x)
-                ) % 360
+        if marker_found:
+            last_marker_seen = time.time()
+            current_angle_20 = detected_angle
 
-        # Log tape state transitions
-        if tape_found != _last_tape_state:
-            if tape_found:
-                print(f"[DAEMON] Tape ACQUIRED  area={tape_area:.0f}  "
-                      f"angle={current_angle_20:.1f}°")
-            else:
-                print(f"[DAEMON] Tape LOST  (largest_area={tape_area:.0f})")
-            _last_tape_state = tape_found
+        if marker_found != _last_tape_state:
+            _last_tape_state = marker_found
 
-        if not tape_found and (time.time() - last_tape_seen) > 2.0 \
-                and target_angle_20 is not None:
-            print("[DAEMON] Tape lost >2 s with active target — stopping motor")
-            set_speed_20(SPEED_STOP)
+        # --- Watchdog --------------------------------------------------------
+        if not marker_found:
+            elapsed = time.time() - last_marker_seen
+            if elapsed > TRACKING_TIMEOUT and target_angle_20 is not None:
+                print(f"[DAEMON] Marker lost {elapsed:.1f} s — stopping motor")
+                set_speed_20(SPEED_STOP)
 
-        if target_angle_20 is not None and tape_found:
+        # --- Motor control ---------------------------------------------------
+        if target_angle_20 is not None and marker_found:
             diff = shortest_angle_diff(current_angle_20, target_angle_20)
             dist = abs(diff)
 
-            # Throttled tracking log
             now = time.time()
             if now - _last_log_time >= 1.0:
                 mode = "HOMING" if is_homing else "TARGETING"
@@ -522,13 +893,16 @@ def servo_tracking_daemon():
                     print("[ARM]    Tilting down...")
                     set_angle_instant_21(0)
                     time.sleep(1.0)
-                    print(f"[DAEMON] Starting HOME sequence → {HOME_ANGLE}°  direction=CCW")
-                    came_from_general_waste = (abs(current_angle_20 - float(Compartment.GENERAL_WASTE.value)) <= ANGLE_TOLERANCE)
+                    print(f"[DAEMON] Starting HOME sequence → {HOME_ANGLE}°")
+                    came_from_general_waste = (
+                        abs(current_angle_20 - float(Compartment.GENERAL_WASTE.value))
+                        <= ANGLE_TOLERANCE
+                    )
                     outbound_direction = SPEED_FWD if came_from_general_waste else SPEED_BWD
                     target_angle_20    = HOME_ANGLE
                     is_homing          = True
                     for _ in range(10):
-                        cap.read()
+                        cap_tracking.read()
                 else:
                     print(f"[DAEMON] HOME REACHED at {current_angle_20:.1f}°  "
                           f"(target={HOME_ANGLE}°  dist={dist:.1f}°)  System idle.")
@@ -536,7 +910,7 @@ def servo_tracking_daemon():
                     outbound_direction = None
                     is_homing          = False
             else:
-                set_speed_20(decelerated_speed(outbound_direction, dist))
+                    set_speed_20(decelerated_speed(outbound_direction, dist))
 
         time.sleep(0.01)
 
@@ -566,7 +940,7 @@ def calibrate_center_point():
     print("=" * 60)
 
     while True:
-        ret, frame = cap.read()
+        ret, frame = cap_tracking.read()
         if not ret:
             cv2.waitKey(30)
             continue
@@ -647,38 +1021,23 @@ def calibrate_compartment_angles():
             disp = frame.copy()
             h, w = disp.shape[:2]
 
-            _draw_crosshair(disp, center_x, center_y, (0, 255, 60), r=6)
-
-            corrected = correct_frame(frame)
-            hsv   = cv2.cvtColor(corrected, cv2.COLOR_BGR2HSV)
-            mask1 = cv2.inRange(hsv, np.array([0, 80, 45]),   np.array([10,  255, 90]))
-            mask2 = cv2.inRange(hsv, np.array([170, 80, 45]), np.array([179, 255, 90]))
-            mask  = mask1 | mask2
-            kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
-            mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
-            conts, _ = cv2.findContours(mask, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
-            tape_vis = False
-            if conts:
-                largest = max(conts, key=cv2.contourArea)
-                if cv2.contourArea(largest) > 250:
-                    tape_vis = True
-                    tip = max(
-                        (pt[0] for pt in largest),
-                        key=lambda p: (p[0] - center_x) ** 2 + (p[1] - center_y) ** 2
-                    )
-                    cv2.circle(disp, tuple(tip), 7, (0, 0, 220), -1)
-                    cv2.line(disp, (center_x, center_y), tuple(tip), (0, 230, 255), 2)
-
-            rad = math.radians(target)
-            ex  = int(center_x + 75 * math.cos(rad))
-            ey  = int(center_y - 75 * math.sin(rad))
-            cv2.arrowedLine(disp, (center_x, center_y), (ex, ey), color, 2, tipLength=0.25)
+            detected_angle, aruco_corners = detect_aruco_angle(frame)
+            tape_vis = detected_angle is not None
+            if tape_vis:
+                cv2.polylines(disp, [aruco_corners.astype(int)], True, (0, 230, 255), 2)
+                c     = aruco_corners
+                top_x = int((c[0][0] + c[1][0]) / 2)
+                top_y = int((c[0][1] + c[1][1]) / 2)
+                bot_x = int((c[2][0] + c[3][0]) / 2)
+                bot_y = int((c[2][1] + c[3][1]) / 2)
+                cv2.arrowedLine(disp, (bot_x, bot_y), (top_x, top_y),
+                                (0, 255, 0), 2, tipLength=0.3)
 
             _put_lines(disp, [
                 f"STEP 2/3 — {material.value}  [{idx+1}/4]",
                 f"Target : {target:6.1f} deg",
                 f"Current: {current_angle_20:6.1f} deg",
-                f"Tape   : {'OK' if tape_vis else 'NOT DETECTED'}",
+                f"Marker : {'OK' if tape_vis else 'NOT DETECTED'}",
             ])
             cv2.putText(disp, "D/A=+/-1  C/Z=+/-5  SPACE=confirm",
                         (5, h - 6), cv2.FONT_HERSHEY_SIMPLEX, 0.37,
@@ -711,7 +1070,6 @@ def calibrate_compartment_angles():
     cv2.waitKey(1)
     calibration_mode = False
 
-    # Update the routing map with user-calibrated angles
     for material, angle in calibrated.items():
         MATERIAL_TO_COMPARTMENT[material] = angle  # type: ignore[assignment]
 
@@ -762,15 +1120,124 @@ def calibrate_spectrometer():
 
 
 # =============================================================================
+# 11a. SENSOR FUSION
+# =============================================================================
+
+def fuse_results(vision_label: str, material: Material, weight_g: float) -> Material:
+    print(f"[FUSION] vision={vision_label}  material={material.value}  weight={weight_g:.1f} g")
+
+    if is_contaminated(material, weight_g):
+        print(f"[FUSION] ✗ Contaminated → GENERAL_WASTE")
+        return Material.GENERAL_WASTE
+
+    print(f"[FUSION] ✓ Clean → {material.value}")
+    return material
+
+
+# =============================================================================
 # 11. PARALLEL DETECTION PATHS
 # =============================================================================
 
-def path_1_vision_model():
-    print("[PATH 1] Starting vision model inference...")
-    time.sleep(1.5)
-    predicted_object = "Bottle"
-    print(f"[PATH 1] ✓ Vision result: {predicted_object}")
-    return predicted_object
+def path_1_vision_model() -> str:
+    print(f"[PATH 1] Starting vision inference on camera index {VISION_CAM_INDEX}...")
+
+    buffer      = []
+    frame_count = 0
+    t_start     = time.perf_counter()
+
+    startx = VISION_FRAME_W  // 2 - VISION_CAPTURE_BOX_SIZE // 2
+    starty = VISION_FRAME_H  // 2 - VISION_CAPTURE_BOX_SIZE // 2
+
+    while True:
+        elapsed = time.perf_counter() - t_start
+
+        if elapsed >= VISION_TIMEOUT_S:
+            if buffer:
+                ids    = [x[0] for x in buffer]
+                counts = Counter(ids)
+                best_cls, freq = counts.most_common(1)[0]
+                scores = [x[1] for x in buffer if x[0] == best_cls]
+                avg_c  = sum(scores) / len(scores)
+                label  = CLASS_NAMES[best_cls] if best_cls < len(CLASS_NAMES) \
+                         else f"class_{best_cls}"
+                print(f"\n[PATH 1] ⚠ Timeout after {elapsed:.1f} s — "
+                      f"best guess: {label}  freq={freq}/{len(buffer)}  "
+                      f"avg_conf={avg_c:.2%}")
+                return label
+            print(f"\n[PATH 1] ⚠ Timeout with empty buffer — returning 'unknown'")
+            return "unknown"
+
+        ret, frame = cap_vision.read()
+        if not ret:
+            time.sleep(0.01)
+            continue
+
+        frame_count += 1
+
+        roi         = frame[starty:starty + VISION_CAPTURE_BOX_SIZE,
+                            startx:startx + VISION_CAPTURE_BOX_SIZE]
+        roi_resized = cv2.resize(roi, (VISION_MODEL_INPUT_SIZE, VISION_MODEL_INPUT_SIZE))
+        img         = cv2.cvtColor(roi_resized, cv2.COLOR_BGR2RGB)
+
+        class_id, confidence, inf_time_ms, probabilities = run_inference(
+            quantized=VISION_QUANTIZED,
+            inference_engine=vision_model,
+            input_details=vision_input_details,
+            output_details=vision_output_details,
+            img_crop=img,
+        )
+
+        buffer.append((class_id, confidence, probabilities))
+        if len(buffer) > VISION_BUFFER_THRESHOLD:
+            buffer.pop(0)
+
+        label_now = CLASS_NAMES[class_id] if class_id < len(CLASS_NAMES) \
+                    else f"class_{class_id}"
+        print(f"[PATH 1] Frame {frame_count:4d} | {label_now:<20} {confidence:.2f}",
+              end="\r")
+
+        if len(buffer) == VISION_BUFFER_THRESHOLD:
+            ids    = [x[0] for x in buffer]
+            counts = Counter(ids)
+            most_common_cls, freq = counts.most_common(1)[0]
+            scores = [x[1] for x in buffer if x[0] == most_common_cls]
+            avg_confidence = sum(scores) / len(scores)
+
+            if freq >= VISION_FREQ_THRESHOLD and avg_confidence >= VISION_CONF_THRESHOLD:
+                label = CLASS_NAMES[most_common_cls] if most_common_cls < len(CLASS_NAMES) \
+                        else f"class_{most_common_cls}"
+
+                sorted_scores = sorted(scores)
+                median_conf   = sorted_scores[len(sorted_scores) // 2]
+                avg_probs     = np.mean([x[2] for x in buffer], axis=0)
+                ranked        = sorted(enumerate(avg_probs),
+                                       key=lambda x: x[1], reverse=True)
+
+                print(f"\n[PATH 1] {'='*50}")
+                print(f"[PATH 1] ✅ DETECTED: {label}")
+                print(f"[PATH 1] {'='*50}")
+                print(f"[PATH 1] Frames to detection : {frame_count}")
+                print(f"[PATH 1] Time to detection   : {elapsed:.2f} s")
+                print(f"[PATH 1] Freq in buffer      : {freq}/{VISION_BUFFER_THRESHOLD}")
+                print(f"[PATH 1] Avg confidence      : {avg_confidence:.2%}")
+                print(f"[PATH 1] Min confidence      : {min(scores):.2%}")
+                print(f"[PATH 1] Max confidence      : {max(scores):.2%}")
+                print(f"[PATH 1] Median confidence   : {median_conf:.2%}")
+
+                print(f"[PATH 1] Full buffer at trigger:")
+                for i, (cid, conf, probs) in enumerate(buffer):
+                    margin = sorted(probs, reverse=True)[0] - sorted(probs, reverse=True)[1]
+                    cname  = CLASS_NAMES[cid] if cid < len(CLASS_NAMES) else f"class_{cid}"
+                    print(f"           [{i+1:2d}] {cname:<20} conf={conf:.2f}  "
+                          f"margin={margin:.2f}")
+
+                print(f"[PATH 1] Final probabilities (averaged across buffer):")
+                for cid, prob in ranked:
+                    cname = CLASS_NAMES[cid] if cid < len(CLASS_NAMES) else f"class_{cid}"
+                    bar   = "█" * int(prob * 40)
+                    print(f"           {cname:<20} {prob:.2%}  {bar}")
+
+                return label
 
 
 def path_2_material_detection() -> Material:
@@ -805,7 +1272,8 @@ def path_2_material_detection() -> Material:
     print(
         f"[PATH 2] ✓ Spectrometer → {result.value}{flag}  "
         f"confidence={confidence:.1f}%  |  "
-        f"d_plastic={debug['d_plastic']:.4f}  d_glass={debug['d_glass']:.4f}  |  "
+        f"sam_p={debug['sam_plastic']:.2f}°  sam_g={debug['sam_glass']:.2f}°  "
+        f"chi_p={debug['chi_plastic']:.4f}  chi_g={debug['chi_glass']:.4f}  |  "
         f"samples_used={debug['samples_used']}  dropped={debug['samples_dropped']}"
     )
     return result
@@ -822,7 +1290,7 @@ def main_pipeline():
     hx.reset()
     tare_scale()
 
-    calibrate_center_point()
+    # calibrate_center_point()
 
     threading.Thread(target=servo_tracking_daemon, daemon=True).start()
     time.sleep(0.4)
@@ -873,16 +1341,8 @@ def main_pipeline():
                 print(f"  Path 2 — Material : {material_result.value}")
                 print(f"  Weight            : {weight:.1f} g")
 
-                # Contamination check — rules differ per material
-                print("\n[PIPELINE] Running contamination check...")
-                if is_contaminated(material_result, weight):
-                    final_decision = Material.GENERAL_WASTE
-                    print(f"[PIPELINE] Object is CONTAMINATED → overriding to GENERAL_WASTE")
-                else:
-                    final_decision = material_result
-                    print(f"[PIPELINE] Object is CLEAN → keeping {final_decision.value}")
+                final_decision = fuse_results(vision_result, material_result, weight)
 
-                # Resolve compartment angle
                 compartment = MATERIAL_TO_COMPARTMENT.get(
                     final_decision, MATERIAL_TO_COMPARTMENT[Material.GENERAL_WASTE]
                 )
@@ -894,6 +1354,7 @@ def main_pipeline():
                 print(f"[PIPELINE]  COMPARTMENT    : {target_deg:.1f}°")
                 print(f"[PIPELINE] ══════════════════════════════")
 
+                mqtt_publish_result(final_decision, vision_result, weight)
                 _set_target(target_deg)
                 print(f"[PIPELINE] Arm in motion — waiting for cycle to complete...")
 
@@ -912,7 +1373,10 @@ def main_pipeline():
         pwm20.stop()
         pwm21.stop()
         GPIO.cleanup()
-        cap.release()
+        mqtt_client.loop_stop()
+        mqtt_client.disconnect()
+        cap_tracking.release()
+        cap_vision.release()
         cv2.destroyAllWindows()
         print("[SYSTEM] Goodbye.")
 

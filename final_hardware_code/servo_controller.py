@@ -3,7 +3,28 @@ import numpy as np
 import math
 import RPi.GPIO as GPIO
 import time
+# Color correction LUT — counteracts purple UV lighting
+_CORRECTION_LUT_B = None
+_CORRECTION_LUT_G = None
+_CORRECTION_LUT_R = None
 
+_CORRECTION_LUT_B = None
+_CORRECTION_LUT_G = None
+_CORRECTION_LUT_R = None
+
+def correct_frame(frame):
+    """White-balance correction: neutralises purple UV cast so green tape reads as green."""
+    global _CORRECTION_LUT_B, _CORRECTION_LUT_G, _CORRECTION_LUT_R
+    if _CORRECTION_LUT_B is None:
+        _CORRECTION_LUT_B = np.array([min(255, int(i * 0.457)) for i in range(256)], dtype=np.uint8)
+        _CORRECTION_LUT_G = np.array([min(255, int(i * 0.85))  for i in range(256)], dtype=np.uint8)
+        _CORRECTION_LUT_R = np.array([min(255, int(i * 0.926)) for i in range(256)], dtype=np.uint8)
+    b, g, r = cv2.split(frame)
+    return cv2.merge((
+        cv2.LUT(b, _CORRECTION_LUT_B),
+        cv2.LUT(g, _CORRECTION_LUT_G),
+        cv2.LUT(r, _CORRECTION_LUT_R),
+    ))
 # =============================================================================
 # GPIO CONFIGURATION
 # =============================================================================
@@ -51,7 +72,7 @@ current_speed_20 = -1.0
 target_angle_20  = None
 outbound_direction = None  # locked at sequence start, reversed for homing
 is_homing        = False
-HOME_ANGLE       = 90
+HOME_ANGLE       = 293
 
 # Watchdog
 last_tape_seen_time = time.time()
@@ -63,8 +84,8 @@ cap = cv2.VideoCapture(CAMERA_INDEX)
 cap.set(cv2.CAP_PROP_FRAME_WIDTH, 320)
 cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 240)
 
-center_x = 127
-center_y = 98
+center_x, center_y = 198, 124
+
 
 def set_center_callback(event, x, y, flags, param):
     global center_x, center_y
@@ -159,15 +180,26 @@ try:
             break
 
         # --- Vision ---
-        hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
-        color_mask = cv2.inRange(hsv, np.array([35, 70, 70]), np.array([85, 255, 255]))
-        contours, _ = cv2.findContours(color_mask, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
+        corrected = correct_frame(frame)
+        hsv = cv2.cvtColor(corrected, cv2.COLOR_BGR2HSV)
+        mask1 = cv2.inRange(hsv, np.array([0, 55, 15]), np.array([15, 255, 160]))
+        mask2 = cv2.inRange(hsv, np.array([170, 55  , 15]), np.array([179, 255, 160]))
+       
+        mask4 = cv2.inRange(hsv, np.array([150, 200  , 45]), np.array([179, 255, 70]))
+
+        mask = mask1 | mask2  | mask4
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
+        
+
+
+        contours, _ = cv2.findContours(mask, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
 
         tape_found = False
 
         if contours:
             largest = max(contours, key=cv2.contourArea)
-            if cv2.contourArea(largest) > 100:
+            if cv2.contourArea(largest) > 50:
                 tape_found = True
                 last_tape_seen_time = time.time()
 
@@ -207,7 +239,7 @@ try:
                 if not is_homing:
                     print(f"\n[TARGET REACHED] At {int(current_angle_20)}")
                     print("  -> Arm up (90)...")
-                    set_angle_instant_21(100)
+                    set_angle_instant_21(60)
                     time.sleep(1.0)
                     print("  -> Arm down (0)...")
                     set_angle_instant_21(0)
@@ -253,7 +285,8 @@ try:
                     cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
 
         cv2.imshow("Live Tracking", frame)
-        cv2.imshow("Mask (White=Tape)", color_mask)
+        cv2.imshow("Filter", corrected    )
+        cv2.imshow("Mask (White=Tape)", mask)
 
         # --- Keys ---
         key = cv2.waitKey(1) & 0xFF
@@ -275,8 +308,8 @@ try:
             set_speed_20(SPEED_STOP)
             print("Manual: Stop")
         elif key == ord('i'):
-            set_angle_instant_21(100)
-            print("Manual: Arm -> 90")
+            set_angle_instant_21(60)
+            print("Manual: Arm -> 60")
         elif key == ord('j'):
             set_angle_instant_21(0)
             print("Manual: Arm -> 0")
