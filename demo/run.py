@@ -23,10 +23,23 @@ QUANTIZED = True
 
 BUFFER_THRESHOLD = 10
 FREQ_THRESHOLD = 7
-AVERAGE_CONF_THRESHOLD = 0.89
+#AVERAGE_CONF_THRESHOLD = 0.89
+AVERAGE_CONF_THRESHOLD = 0.50
 
 # ---------------- Load Model ----------------
-latest_model_path = return_latest_version_path("mobilenet")
+latest_model_path, latest_version = return_latest_version_path("mobilenet")
+
+#! =================================DEBUGGING PURPOSES======================
+if latest_version == 14: 
+    print("⚠️  Detected MobileNet v14, adjusting 0.89 thresholds for better detection...")
+    AVERAGE_CONF_THRESHOLD = 0.89
+elif latest_version == 15:
+    print("⚠️  Detected MobileNet v15, using 0.50 thresholds for better detection...")
+    AVERAGE_CONF_THRESHOLD = 0.50
+#! ==================================================
+
+
+
 model, input_details, output_details, model_path = load_model(quantized=QUANTIZED, model_path=latest_model_path)
 
 labels_path = os.path.join(latest_model_path, "labels.txt")

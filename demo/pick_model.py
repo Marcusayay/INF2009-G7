@@ -5,21 +5,21 @@ def return_latest_version_path(model: str,) :
         model_dir = "../Train/mobnet_models"
         existing_versions = [d for d in os.listdir(model_dir) if d.startswith("v")]
         if not existing_versions: 
-            return None  # No existing models 
+            return None, None  # No existing models 
         latest_version = max(existing_versions, key=lambda x: int(x[1:]))  # Extract version number
         latest_model_path = os.path.join(model_dir, latest_version)
         print(f"✅ Latest MobileNet model found: {latest_model_path}") 
-        return latest_model_path
+        return latest_model_path, int(latest_version[1:])
         
     elif model == "yolo":
         model_dir = "yolo_models"
         existing_versions = [d for d in os.listdir(model_dir) if d.startswith("v")]
-        if not existing_versions: 
-            return None  # No existing models 
+        if not existing_versions:   
+            return None, None
         latest_version = max(existing_versions, key=lambda x: int(x[1:]))  # Extract version number
         latest_model_path = os.path.join(model_dir, latest_version)
         print(f"✅ Latest YOLO model found: {latest_model_path}") 
-        return latest_model_path 
+        return latest_model_path, int(latest_version[1:])
 
 if __name__ == "__main__":
     latest_mobnet = return_latest_version_path("yolo") 
