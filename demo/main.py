@@ -125,7 +125,7 @@ beam_sensor = Button(PIN_BEAM, pull_up=True)
 SPEC_GAIN                     = 2048
 SPEC_INTEGRATION_TIME         = 200
 SPEC_CALIBRATION_SAMPLES      = 12
-SPEC_SCAN_SAMPLES             = 6
+SPEC_SCAN_SAMPLES             = 2
 SPEC_LOW_CONFIDENCE_THRESHOLD = 15
 SPEC_CALIB_FILE               = "calibration.json"
 SPEC_EXCLUDE_CHANNELS         = {'flicker', 'clear'}
@@ -900,22 +900,40 @@ def servo_tracking_daemon():
                 elif not is_homing:
                     print(f"\n[DAEMON] TARGET REACHED at {current_angle_20:.1f}°  "
                           f"(target={target_angle_20:.1f}°  dist={dist:.1f}°)")
+                    # NEW — waits for marker to reappear before starting homing
                     print("[ARM]    Tilting up...")
                     set_angle_instant_21(100)
                     time.sleep(1.0)
                     print("[ARM]    Tilting down...")
                     set_angle_instant_21(0)
-                    time.sleep(1.0)
-                    print(f"[DAEMON] Starting HOME sequence → {HOME_ANGLE}°")
+
                     came_from_general_waste = (
                         abs(current_angle_20 - float(Compartment.GENERAL_WASTE.value))
                         <= ANGLE_TOLERANCE
                     )
                     outbound_direction = SPEED_FWD if came_from_general_waste else SPEED_BWD
-                    target_angle_20    = HOME_ANGLE
-                    is_homing          = True
-                    for _ in range(10):
-                        cap_tracking.read()
+
+                    print("[DAEMON] Tilt complete — waiting for marker to reappear before homing...")
+                    _marker_wait_start = time.time()
+                    while True:
+                        ret, _wf = cap_tracking.read()
+                        if not ret:
+                            time.sleep(0.01)
+                            continue
+                        _recheck_angle, _ = detect_aruco_angle(_wf)
+                        if _recheck_angle is not None:
+                            current_angle_20 = _recheck_angle
+                            last_marker_seen = time.time()
+                            print(f"[DAEMON] Marker reacquired at {current_angle_20:.1f}°  "
+                                f"(waited {time.time() - _marker_wait_start:.2f} s) — starting HOME")
+                            break
+                        if time.time() - _marker_wait_start > 5.0:
+                            print("[DAEMON] Marker not reacquired after 5 s — starting HOME anyway")
+                            break
+                        time.sleep(0.01)
+
+                    target_angle_20 = HOME_ANGLE
+                    is_homing       = True
                 else:
                     print(f"[DAEMON] HOME REACHED at {current_angle_20:.1f}°  "
                           f"(target={HOME_ANGLE}°  dist={dist:.1f}°)  System idle.")
