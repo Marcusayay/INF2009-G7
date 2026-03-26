@@ -154,8 +154,8 @@ pwm21 = GPIO.PWM(PIN_21, 50)
 pwm21.start(0)
 
 MOTOR_DIRECTION_SIGN                             = 1
-SPEED_BWD, SPEED_FWD, SPEED_NEUTRAL, SPEED_STOP = 8.5, 6.5, 7.5, 0
-DECEL_START, DECEL_NEAR, CRAWL_FACTOR            = 60, 25, 0.5
+SPEED_BWD, SPEED_FWD, SPEED_NEUTRAL, SPEED_STOP = 9.0, 6.0, 7.5, 0
+DECEL_START, DECEL_NEAR, CRAWL_FACTOR            = 60, 25,1 
 ANGLE_TOLERANCE                                  = 12
 
 last_angle_21      = -1
@@ -530,12 +530,12 @@ def _spec_euclidean(a, b):
     common = set(a) & set(b)
     return math.sqrt(sum((a[k] - b[k]) ** 2 for k in common))
 
-def _spec_weighted_dist(scan_fp, profile):
-    mean, std = profile["mean"], profile["std"]
-    common    = set(scan_fp) & set(mean)
-    return math.sqrt(sum(
-        ((scan_fp[k] - mean[k]) / (std[k] + 1e-6)) ** 2 for k in common
-    ))
+# def _spec_weighted_dist(scan_fp, profile):
+#     mean, std = profile["mean"], profile["std"]
+#     common    = set(scan_fp) & set(mean)
+#     return math.sqrt(sum(
+#         ((scan_fp[k] - mean[k]) / (std[k] + 1e-6)) ** 2 for k in common
+#     ))
 
 def _spec_reject_outliers(fps):
     if len(fps) < 3:
@@ -601,8 +601,140 @@ def _spec_confidence(dp, dg, pp, gp):
     prox   = max(0.0, 1.0 - min(dp, dg) / spread)
     margin = min(1.0, abs(dp - dg) / spread)
     return (prox * 0.6 + margin * 0.4) * 100
+# =============================================================================
+# SPECTROMETER — UPDATED DISTANCE & CLASSIFICATION FUNCTIONS
+#
+# Drop these in as direct replacements for the following functions in main.py:
+#   - _spec_weighted_dist        → REMOVED (replaced by SAM + chi-squared)
+#   - _spec_confidence           → replaced by _spec_confidence_sam
+#   - _spec_scan_and_classify    → updated in-place
+#
+# Everything else (_spec_get_fingerprint, _spec_average, _spec_euclidean,
+# _spec_reject_outliers, _spec_calibrate_material, etc.) is unchanged.
+#
+# WHAT CHANGED AND WHY:
+#   Old: weighted Euclidean distance with 1/sigma per channel
+#        - treats channels as independent (wrong — adjacent bands correlate)
+#        - sensitive to absolute intensity shifts from placement variance
+#
+#   New: SAM (primary, 70%) + Chi-squared (secondary, 30%)
+#        - SAM measures the ANGLE between spectral vectors, so uniform
+#          brightness shifts from LED flicker or bad placement are ignored
+#        - Chi-squared down-weights noisy near-zero channels naturally
+#        - Both metrics work directly on the normalised fingerprints already
+#          produced by _spec_get_fingerprint — no extra calibration needed
+# =============================================================================
 
-def _spec_scan_and_classify(pp, gp, samples=SPEC_SCAN_SAMPLES):
+import math
+import numpy as np
+
+
+# -----------------------------------------------------------------------------
+# DISTANCE METRICS
+# -----------------------------------------------------------------------------
+
+def _spec_sam(scan_fp: dict, profile_mean: dict) -> float:
+    """
+    Spectral Angle Mapper — returns angle in degrees between scan and profile.
+    Lower = closer match.  Range: [0, 90].
+
+    Completely invariant to uniform illumination scaling, making it robust
+    to LED intensity drift and inconsistent item placement height.
+    """
+    keys = set(scan_fp) & set(profile_mean)
+    va   = np.array([scan_fp[k]      for k in keys], dtype=float)
+    vb   = np.array([profile_mean[k] for k in keys], dtype=float)
+    norm = np.linalg.norm(va) * np.linalg.norm(vb)
+    if norm < 1e-9:
+        return 90.0  # degenerate — treat as maximally different
+    cos_theta = np.dot(va, vb) / norm
+    return float(np.degrees(np.arccos(np.clip(cos_theta, -1.0, 1.0))))
+
+
+def _spec_chi_squared(scan_fp: dict, profile_mean: dict) -> float:
+    """
+    Chi-squared distance between scan fingerprint and profile mean.
+    Lower = closer match.
+
+    Down-weights channels with low signal in both scan and profile,
+    so noisy near-zero channels don't dominate the decision.
+    """
+    keys = set(scan_fp) & set(profile_mean)
+    return float(sum(
+        (scan_fp[k] - profile_mean[k]) ** 2 / (scan_fp[k] + profile_mean[k] + 1e-9)
+        for k in keys
+    ))
+
+
+# -----------------------------------------------------------------------------
+# CONFIDENCE — replaces _spec_confidence
+# -----------------------------------------------------------------------------
+
+def _spec_confidence_sam(
+    sam_p: float, sam_g: float,
+    chi_p: float, chi_g: float,
+    pp_mean: dict, gp_mean: dict,
+) -> float:
+    """
+    Confidence score [0, 100] using SAM (70%) + chi-squared margin (30%).
+
+    SAM component:
+      - profile_sep  : angular distance between the two calibration means
+                       (how different plastic and glass look to the sensor)
+      - prox         : how close the scan is to the winning profile,
+                       relative to that separation  (0 = at the profile, 1 = far)
+      - sam_margin   : how decisively one profile beats the other
+
+    Chi-squared component:
+      - simple normalised margin — which metric agrees with SAM and by how much
+
+    Low confidence means the two profiles look similar in this environment
+    (poor sensor placement, contaminated reference, or sensor degradation).
+    """
+    # Angular separation between the two calibration profiles
+    profile_sep = _spec_sam(pp_mean, gp_mean)
+    if profile_sep < 0.1:           # profiles indistinguishable — can't be confident
+        return 0.0
+
+    winner_angle = min(sam_p, sam_g)
+
+    # Proximity: scan angle to winner, normalised by profile separation
+    prox       = max(0.0, 1.0 - winner_angle / profile_sep)
+
+    # SAM margin: decisiveness of the angle difference
+    sam_margin = min(1.0, abs(sam_p - sam_g) / profile_sep)
+
+    sam_conf   = prox * 0.6 + sam_margin * 0.4
+
+    # Chi-squared margin (normalised, direction-agnostic)
+    chi_total  = chi_p + chi_g + 1e-9
+    chi_margin = abs(chi_p - chi_g) / chi_total   # 0–1
+
+    combined   = (0.70 * sam_conf + 0.30 * chi_margin) * 100.0
+    return min(combined, 100.0)
+
+
+# -----------------------------------------------------------------------------
+# CLASSIFICATION — drop-in replacement for _spec_scan_and_classify
+# -----------------------------------------------------------------------------
+
+def _spec_scan_and_classify(pp, gp, samples=6):
+    """
+    Collect `samples` spectral fingerprints, reject outliers, average, then
+    classify as PLASTIC or GLASS using SAM (primary) + chi-squared (secondary).
+
+    Ensemble decision:
+      Each metric votes independently on normalised scores.  SAM carries 70%
+      of the weight; chi-squared carries 30%.  A lower combined score means
+      a better match.
+
+    Returns:
+        (Material or None,  confidence float,  debug dict)
+    """
+    from collections import namedtuple
+    # Import Material from the outer module — adjust if needed
+    from __main__ import Material, _spec_get_fingerprint, _spec_average, _spec_reject_outliers
+
     print(f"[SPEC]   Starting scan — collecting {samples} fingerprints...")
     fps = []
     for i in range(samples):
@@ -612,31 +744,73 @@ def _spec_scan_and_classify(pp, gp, samples=SPEC_SCAN_SAMPLES):
             print(f"[SPEC]   Sample {i+1}/{samples} collected  (channels={len(fp)})")
         else:
             print(f"[SPEC]   Sample {i+1}/{samples} FAILED — skipped")
-        time.sleep(0.08)
+        import time; time.sleep(0.08)
+
     print(f"[SPEC]   Raw collected: {len(fps)}/{samples}")
     if not fps:
         print("[SPEC]   No valid samples — classification aborted")
         return None, 0, {}
+
     clean, dropped = _spec_reject_outliers(fps)
     print(f"[SPEC]   After outlier rejection: {len(clean)} clean, {dropped} dropped")
     if not clean:
         print("[SPEC]   All samples rejected — classification aborted")
         return None, 0, {}
-    scan = _spec_average(clean)
-    dp   = _spec_weighted_dist(scan, pp)
-    dg   = _spec_weighted_dist(scan, gp)
-    conf = _spec_confidence(dp, dg, pp, gp)
-    result = Material.PLASTIC if dp <= dg else Material.GLASS
-    winner = "PLASTIC" if dp <= dg else "GLASS"
-    loser  = "GLASS"   if dp <= dg else "PLASTIC"
-    margin = abs(dp - dg)
-    print(f"[SPEC]   d_plastic={dp:.4f}  d_glass={dg:.4f}  "
-          f"margin={margin:.4f}  confidence={conf:.1f}%")
-    print(f"[SPEC]   → {winner} wins over {loser}")
-    debug = {"d_plastic": dp, "d_glass": dg,
-             "samples_used": len(clean), "samples_dropped": dropped}
-    return result, conf, debug
 
+    scan = _spec_average(clean)
+
+    # --- SAM distances -------------------------------------------------------
+    sam_p = _spec_sam(scan, pp["mean"])
+    sam_g = _spec_sam(scan, gp["mean"])
+
+    # --- Chi-squared distances -----------------------------------------------
+    chi_p = _spec_chi_squared(scan, pp["mean"])
+    chi_g = _spec_chi_squared(scan, gp["mean"])
+
+    # --- Ensemble score (lower = better match) --------------------------------
+    # Normalise each metric so the two are on a common [0,1] scale before mixing
+    sam_total   = sam_p + sam_g + 1e-9
+    chi_total   = chi_p + chi_g + 1e-9
+
+    SAM_WEIGHT  = 0.70
+    CHI_WEIGHT  = 0.30
+
+    score_p = SAM_WEIGHT * (sam_p / sam_total) + CHI_WEIGHT * (chi_p / chi_total)
+    score_g = SAM_WEIGHT * (sam_g / sam_total) + CHI_WEIGHT * (chi_g / chi_total)
+
+    result  = Material.PLASTIC if score_p <= score_g else Material.GLASS
+    winner  = "PLASTIC" if score_p <= score_g else "GLASS"
+    loser   = "GLASS"   if score_p <= score_g else "PLASTIC"
+
+    # --- Confidence ----------------------------------------------------------
+    conf = _spec_confidence_sam(sam_p, sam_g, chi_p, chi_g, pp["mean"], gp["mean"])
+
+    # --- Logging -------------------------------------------------------------
+    profile_sep = _spec_sam(pp["mean"], gp["mean"])
+    print(
+        f"[SPEC]   SAM  → plastic={sam_p:.2f}°  glass={sam_g:.2f}°  "
+        f"profile_sep={profile_sep:.2f}°"
+    )
+    print(
+        f"[SPEC]   Chi² → plastic={chi_p:.4f}  glass={chi_g:.4f}"
+    )
+    print(
+        f"[SPEC]   Ensemble score → plastic={score_p:.4f}  glass={score_g:.4f}"
+    )
+    print(f"[SPEC]   → {winner} wins over {loser}  confidence={conf:.1f}%")
+
+    debug = {
+        "sam_plastic":     sam_p,
+        "sam_glass":       sam_g,
+        "chi_plastic":     chi_p,
+        "chi_glass":       chi_g,
+        "score_plastic":   score_p,
+        "score_glass":     score_g,
+        "profile_sep_deg": profile_sep,
+        "samples_used":    len(clean),
+        "samples_dropped": dropped,
+    }
+    return result, conf, debug
 
 # =============================================================================
 # 7. SERVO TRACKING DAEMON  (uses cap_tracking — camera index 0)
@@ -1098,7 +1272,8 @@ def path_2_material_detection() -> Material:
     print(
         f"[PATH 2] ✓ Spectrometer → {result.value}{flag}  "
         f"confidence={confidence:.1f}%  |  "
-        f"d_plastic={debug['d_plastic']:.4f}  d_glass={debug['d_glass']:.4f}  |  "
+        f"sam_p={debug['sam_plastic']:.2f}°  sam_g={debug['sam_glass']:.2f}°  "
+        f"chi_p={debug['chi_plastic']:.4f}  chi_g={debug['chi_glass']:.4f}  |  "
         f"samples_used={debug['samples_used']}  dropped={debug['samples_dropped']}"
     )
     return result
