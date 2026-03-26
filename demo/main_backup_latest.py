@@ -108,8 +108,6 @@ OFFSET = 0
 WEIGHT_TRIGGER_THRESHOLD = 5.0
 
 METAL_CONTAMINATION_WEIGHT_LIMIT = 500.0
-PLASTIC_GLASS_WEIGHT_THRESHOLD = 100.0
-
 
 # -- Inductive Sensor (SN04-N) --
 PIN_INDUCTIVE = 16
@@ -129,18 +127,6 @@ SPEC_SCAN_SAMPLES             = 6
 SPEC_LOW_CONFIDENCE_THRESHOLD = 15
 SPEC_CALIB_FILE               = "calibration.json"
 SPEC_EXCLUDE_CHANNELS         = {'flicker', 'clear'}
-
-VISION_LABEL_MAP: dict[str, tuple[str, str]] = {
-    "carton_tetrapack": ("tetra",   "carton"),
-    "disposable_cup":   ("general", "others"),
-    "glass_bottle":     ("glass",   "bottle"),
-    "glass_cup":        ("glass",   "bottle"),
-    "metal_bottle":     ("metal",   "bottle"),
-    "metal_can":        ("metal",   "can"),
-    "plastic_bottle":   ("plastic", "bottle"),
-}
-_VISION_FALLBACK = ("general", "others")
-
 
 try:
     spectrometer = AS7343()
@@ -212,9 +198,9 @@ cap_vision.set(cv2.CAP_PROP_FRAME_WIDTH,  640)
 cap_vision.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
 cap_vision.set(cv2.CAP_PROP_BUFFERSIZE, 1)
 if not cap_vision.isOpened():
-    print(f"[WARNING] Vision camera (index {VISION_CAM_INDEX}) not available — "
-          f"vision path will be skipped.")
-    cap_vision = None
+    print(f"[ERROR] Cannot open vision camera (index {VISION_CAM_INDEX}). "
+          "Check /dev/video2.")
+    sys.exit(1)
 
 
 # =============================================================================
@@ -229,7 +215,7 @@ VISION_QUANTIZED               = True
 VISION_BUFFER_THRESHOLD = 10
 VISION_FREQ_THRESHOLD   = 7
 VISION_CONF_THRESHOLD   = 0.89
-VISION_TIMEOUT_S        = 1.0
+VISION_TIMEOUT_S        = 15.0
 
 print("[VISION] Loading MobileNet model...")
 latest_model_path = return_latest_version_path("mobilenet")
@@ -256,12 +242,12 @@ MQTT_BROKER = "10.127.71.107"
 MQTT_PORT   = 1883
 MQTT_TOPIC  = "pi/raw_transaction"
 
-# _MATERIAL_TO_MQTT = {
-#     Material.METAL:         "metal",
-#     Material.GLASS:         "glass",
-#     Material.PLASTIC:       "plastic",
-#     Material.GENERAL_WASTE: "general",
-# }
+_MATERIAL_TO_MQTT = {
+    Material.METAL:         "metal",
+    Material.GLASS:         "glass",
+    Material.PLASTIC:       "plastic",
+    Material.GENERAL_WASTE: "general",
+}
 
 mqtt_client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
 
@@ -292,12 +278,10 @@ try:
 except Exception as e:
     print(f"[MQTT]  WARNING: Could not connect to broker ({e}). Publishing will be skipped.")
 
-
-def mqtt_publish_result(final_material, mqtt_material_str: str,
-                        mqtt_shape_str: str, weight_g: float):
+def mqtt_publish_result(final_material, vision_label, weight_g):
     payload = {
-        "material": mqtt_material_str,
-        "type":     mqtt_shape_str,
+        "material": _MATERIAL_TO_MQTT.get(final_material, "general"),
+        "type":     vision_label.lower(),
         "weight":   f"{weight_g:.1f}g",
     }
     try:
@@ -486,28 +470,28 @@ def get_weight() -> float:
 # 5. CONTAMINATION CHECK — material-aware
 # =============================================================================
 
-# def is_contaminated(material: Material, weight: float) -> bool:
-#     print(f"[CONTAM] Checking {material.value}  weight={weight:.1f} g  "
-#           f"beam={'BROKEN' if beam_sensor.is_pressed else 'CLEAR'}")
+def is_contaminated(material: Material, weight: float) -> bool:
+    print(f"[CONTAM] Checking {material.value}  weight={weight:.1f} g  "
+          f"beam={'BROKEN' if beam_sensor.is_pressed else 'CLEAR'}")
 
-#     if material == Material.METAL:
-#         if weight > METAL_CONTAMINATION_WEIGHT_LIMIT:
-#             print(f"[CONTAM] ✗ METAL too heavy "
-#                   f"({weight:.1f} g > {METAL_CONTAMINATION_WEIGHT_LIMIT} g) → General Waste")
-#             return True
-#         print(f"[CONTAM] ✓ METAL weight OK ({weight:.1f} g ≤ {METAL_CONTAMINATION_WEIGHT_LIMIT} g)")
-#         return False
+    if material == Material.METAL:
+        if weight > METAL_CONTAMINATION_WEIGHT_LIMIT:
+            print(f"[CONTAM] ✗ METAL too heavy "
+                  f"({weight:.1f} g > {METAL_CONTAMINATION_WEIGHT_LIMIT} g) → General Waste")
+            return True
+        print(f"[CONTAM] ✓ METAL weight OK ({weight:.1f} g ≤ {METAL_CONTAMINATION_WEIGHT_LIMIT} g)")
+        return False
 
-#     if material in (Material.GLASS, Material.PLASTIC):
-#         if beam_sensor.is_pressed:
-#             print(f"[CONTAM] ✗ Beam BROKEN — liquid detected in "
-#                   f"{material.value} container → General Waste")
-#             return True
-#         print(f"[CONTAM] ✓ Beam CLEAR — {material.value} container is clean")
-#         return False
+    if material in (Material.GLASS, Material.PLASTIC):
+        if beam_sensor.is_pressed:
+            print(f"[CONTAM] ✗ Beam BROKEN — liquid detected in "
+                  f"{material.value} container → General Waste")
+            return True
+        print(f"[CONTAM] ✓ Beam CLEAR — {material.value} container is clean")
+        return False
 
-#     print(f"[CONTAM] ✓ {material.value} — no contamination check required")
-#     return False
+    print(f"[CONTAM] ✓ {material.value} — no contamination check required")
+    return False
 
 
 # =============================================================================
@@ -610,13 +594,13 @@ def _spec_calibrate_material(label, samples=SPEC_CALIBRATION_SAMPLES):
     print(f"  ✓ {label} calibrated from {len(clean)} clean samples.")
     return {"mean": mean, "std": std, "n": len(clean)}
 
-# def _spec_confidence(dp, dg, pp, gp):
-#     spread = _spec_euclidean(pp["mean"], gp["mean"])
-#     if spread < 1e-6:
-#         return 0.0
-#     prox   = max(0.0, 1.0 - min(dp, dg) / spread)
-#     margin = min(1.0, abs(dp - dg) / spread)
-#     return (prox * 0.6 + margin * 0.4) * 100
+def _spec_confidence(dp, dg, pp, gp):
+    spread = _spec_euclidean(pp["mean"], gp["mean"])
+    if spread < 1e-6:
+        return 0.0
+    prox   = max(0.0, 1.0 - min(dp, dg) / spread)
+    margin = min(1.0, abs(dp - dg) / spread)
+    return (prox * 0.6 + margin * 0.4) * 100
 # =============================================================================
 # SPECTROMETER — UPDATED DISTANCE & CLASSIFICATION FUNCTIONS
 #
@@ -747,6 +731,9 @@ def _spec_scan_and_classify(pp, gp, samples=6):
     Returns:
         (Material or None,  confidence float,  debug dict)
     """
+    from collections import namedtuple
+    # Import Material from the outer module — adjust if needed
+    from __main__ import Material, _spec_get_fingerprint, _spec_average, _spec_reject_outliers
 
     print(f"[SPEC]   Starting scan — collecting {samples} fingerprints...")
     fps = []
@@ -1136,93 +1123,15 @@ def calibrate_spectrometer():
 # 11a. SENSOR FUSION
 # =============================================================================
 
-def fuse_results(
-    vision_label:    str,
-    spec_material:   Material,
-    spec_confidence: float,
-    weight_g:        float,
-) -> tuple[Material, str, str]:
-    """
-    Returns (final_material, mqtt_material_str, mqtt_shape_str).
-    """
-    # --- Step 1: Parse vision label ------------------------------------------
-    mqtt_mat_hint, mqtt_shape = VISION_LABEL_MAP.get(vision_label, _VISION_FALLBACK)
- 
-    print(f"\n[FUSION] {'='*48}")
-    print(f"[FUSION] vision_label  = {vision_label}")
-    print(f"[FUSION] spec_material = {spec_material.value}  "
-          f"conf={spec_confidence:.1f}%")
-    print(f"[FUSION] weight        = {weight_g:.1f} g")
-    print(f"[FUSION] vision_hint   = {mqtt_mat_hint}  shape={mqtt_shape}")
-    print(f"[FUSION] beam_sensor   = "
-          f"{'BROKEN — liquid' if beam_sensor.is_pressed else 'CLEAR'}")
-    print(f"[FUSION] {'='*48}")
- 
-    # --- Step 2: Tetrapack ----------------------------------------------------
-    if vision_label == "carton_tetrapack":
-        if weight_g > METAL_CONTAMINATION_WEIGHT_LIMIT:
-            print(f"[FUSION] ✗ Tetrapack too heavy "
-                  f"({weight_g:.1f} g > {METAL_CONTAMINATION_WEIGHT_LIMIT} g) "
-                  f"→ GENERAL_WASTE/others")
-            return Material.GENERAL_WASTE, "general", "others"
-        print(f"[FUSION] ✓ Tetrapack → METAL compartment  "
-              f"[MQTT: material=tetra  type=carton]")
-        return Material.METAL, "tetra", "carton"
- 
-    # --- Step 3: Metal (inductive confirmed) ----------------------------------
-    if spec_material == Material.METAL:
-        if weight_g > METAL_CONTAMINATION_WEIGHT_LIMIT:
-            # Contaminated metal — shape for general waste
-            gw_shape = mqtt_shape if mqtt_shape in ("bottle", "can") else "others"
-            print(f"[FUSION] ✗ Metal too heavy "
-                  f"({weight_g:.1f} g > {METAL_CONTAMINATION_WEIGHT_LIMIT} g) "
-                  f"→ GENERAL_WASTE/{gw_shape}")
-            return Material.GENERAL_WASTE, "general", gw_shape
- 
-        # Clean metal — shape must be bottle or can for broker
-        metal_shape = mqtt_shape if mqtt_shape in ("bottle", "can") else "can"
-        print(f"[FUSION] ✓ Metal clean → METAL/{metal_shape}")
-        return Material.METAL, "metal", metal_shape
- 
-    # --- Step 4: Non-metal contamination gate (beam sensor) -------------------
-    if beam_sensor.is_pressed:
-        gw_shape = mqtt_shape if mqtt_shape in ("bottle", "can") else "others"
-        print(f"[FUSION] ✗ Beam BROKEN — liquid in {spec_material.value} container "
-              f"→ GENERAL_WASTE/{gw_shape}")
-        return Material.GENERAL_WASTE, "general", gw_shape
- 
-    # --- Step 5: Disposable cup, non-metal ------------------------------------
-    if vision_label == "disposable_cup":
-        print(f"[FUSION] Disposable cup, non-metal → GENERAL_WASTE/others")
-        return Material.GENERAL_WASTE, "general", "others"
- 
-    # --- Step 6: Vision vs spectrometer agreement / weight tiebreaker ---------
-    # Vision material hint is "glass" or "plastic"
-    # Spectrometer result is Material.GLASS or Material.PLASTIC
-    spec_str   = spec_material.value.lower()   # "glass" or "plastic"
- 
-    if mqtt_mat_hint == spec_str:
-        # --- Agreement ---
-        final = spec_material
-        print(f"[FUSION] ✓ Vision ({mqtt_mat_hint}) & spectrometer ({spec_str}) agree "
-              f"→ {final.value}/bottle")
-    else:
-        # --- Disagreement → weight tiebreaker --------------------------------
-        print(f"[FUSION] ⚠ Disagreement:  vision={mqtt_mat_hint}  "
-              f"spec={spec_str}  spec_conf={spec_confidence:.1f}%")
-        print(f"[FUSION]   Weight tiebreaker: {weight_g:.1f} g  "
-              f"threshold={PLASTIC_GLASS_WEIGHT_THRESHOLD} g")
- 
-        if weight_g >= PLASTIC_GLASS_WEIGHT_THRESHOLD:
-            final = Material.GLASS
-            print(f"[FUSION]   Weight ≥ threshold → overriding to GLASS")
-        else:
-            final = Material.PLASTIC
-            print(f"[FUSION]   Weight < threshold → overriding to PLASTIC")
- 
-    mqtt_final = "glass" if final == Material.GLASS else "plastic"
-    print(f"[FUSION] ✓ Final → {final.value}/{mqtt_final}/bottle")
-    return final, mqtt_final, "bottle"
+def fuse_results(vision_label: str, material: Material, weight_g: float) -> Material:
+    print(f"[FUSION] vision={vision_label}  material={material.value}  weight={weight_g:.1f} g")
+
+    if is_contaminated(material, weight_g):
+        print(f"[FUSION] ✗ Contaminated → GENERAL_WASTE")
+        return Material.GENERAL_WASTE
+
+    print(f"[FUSION] ✓ Clean → {material.value}")
+    return material
 
 
 # =============================================================================
@@ -1230,9 +1139,6 @@ def fuse_results(
 # =============================================================================
 
 def path_1_vision_model() -> str:
-    if cap_vision is None:
-        print("[PATH 1] Vision camera not available — returning 'unknown'")
-        return "unknown"
     print(f"[PATH 1] Starting vision inference on camera index {VISION_CAM_INDEX}...")
 
     buffer      = []
@@ -1334,34 +1240,34 @@ def path_1_vision_model() -> str:
                 return label
 
 
-def path_2_material_detection() -> tuple[Material, float]:
+def path_2_material_detection() -> Material:
     print("[PATH 2] Starting material detection...")
- 
+
     inductive_raw = metal_sensor.value
     print(f"[PATH 2] Inductive sensor raw value = {inductive_raw}  "
           f"({'TRIGGERED — metal' if inductive_raw == 0 else 'clear — non-metal'})")
- 
+
     if inductive_raw == 0:
         print("[PATH 2] ✓ SN04-N → METAL confirmed")
-        return Material.METAL, 100.0
- 
+        return Material.METAL
+
     print("[PATH 2] Non-metal — querying spectrometer...")
     if not SPECTROMETER_READY:
-        print("[PATH 2] ✗ Spectrometer not ready → defaulting to PLASTIC  conf=0")
-        return Material.PLASTIC, 0.0
+        print("[PATH 2] ✗ Spectrometer not ready → defaulting to PLASTIC")
+        return Material.PLASTIC
     if plastic_profile is None or glass_profile is None:
-        print("[PATH 2] ✗ Calibration profiles missing → defaulting to PLASTIC  conf=0")
-        return Material.PLASTIC, 0.0
- 
+        print("[PATH 2] ✗ Calibration profiles missing → defaulting to PLASTIC")
+        return Material.PLASTIC
+
     print(f"[PATH 2] Profiles loaded  "
           f"(plastic n={plastic_profile['n']}  glass n={glass_profile['n']})")
- 
+
     result, confidence, debug = _spec_scan_and_classify(plastic_profile, glass_profile)
- 
+
     if result is None:
-        print("[PATH 2] ✗ Spectrometer classification failed → defaulting to PLASTIC  conf=0")
-        return Material.PLASTIC, 0.0
- 
+        print("[PATH 2] ✗ Spectrometer classification failed → defaulting to PLASTIC")
+        return Material.PLASTIC
+
     flag = " ⚠ LOW CONFIDENCE" if confidence < SPEC_LOW_CONFIDENCE_THRESHOLD else " ✓"
     print(
         f"[PATH 2] ✓ Spectrometer → {result.value}{flag}  "
@@ -1370,7 +1276,7 @@ def path_2_material_detection() -> tuple[Material, float]:
         f"chi_p={debug['chi_plastic']:.4f}  chi_g={debug['chi_glass']:.4f}  |  "
         f"samples_used={debug['samples_used']}  dropped={debug['samples_dropped']}"
     )
-    return result, confidence
+    return result
 
 
 # =============================================================================
@@ -1420,59 +1326,35 @@ def main_pipeline():
 
                 print("\n[PIPELINE] Launching parallel detection paths...")
                 t_start = time.time()
-                try:
-                    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as ex:
-                        fv = ex.submit(path_1_vision_model)
-                        fm = ex.submit(path_2_material_detection)
-                        vision_result              = fv.result()
-                        material_result, spec_conf = fm.result()
-                except Exception as e:
-                    print(f"[PIPELINE] ✗ Detection path failed: {e} — defaulting to GENERAL_WASTE/others")
-                    _set_target(float(MATERIAL_TO_COMPARTMENT[Material.GENERAL_WASTE].value))
-                    continue
-
-                # Guard None return from vision (timeout with empty buffer)
-                if vision_result is None or vision_result == "unknown":
-                    print(f"[PIPELINE] ✗ Vision returned '{vision_result}' — defaulting to GENERAL_WASTE/others")
-                    mqtt_publish_result(Material.GENERAL_WASTE, "general", "others", weight)
-                    _set_target(float(MATERIAL_TO_COMPARTMENT[Material.GENERAL_WASTE].value))
-                    continue
-
+                with concurrent.futures.ThreadPoolExecutor(max_workers=2) as ex:
+                    fv = ex.submit(path_1_vision_model)
+                    fm = ex.submit(path_2_material_detection)
+                    vision_result   = fv.result()
+                    material_result = fm.result()
                 t_elapsed = time.time() - t_start
                 print(f"[PIPELINE] Both paths complete in {t_elapsed:.2f} s")
- 
+
                 print("\n" + "-" * 50)
                 print("  SENSOR FUSION & CLASSIFICATION")
                 print("-" * 50)
                 print(f"  Path 1 — Vision   : {vision_result}")
-                print(f"  Path 2 — Material : {material_result.value}  "
-                      f"conf={spec_conf:.1f}%")
+                print(f"  Path 2 — Material : {material_result.value}")
                 print(f"  Weight            : {weight:.1f} g")
- 
-                try:
-                    final_decision, mqtt_mat_str, mqtt_shape_str = fuse_results(
-                        vision_result, material_result, spec_conf, weight
-                    )
-                except Exception as e:
-                    print(f"[PIPELINE] ✗ Fusion failed: {e} — defaulting to GENERAL_WASTE/others")
-                    final_decision  = Material.GENERAL_WASTE
-                    mqtt_mat_str    = "general"
-                    mqtt_shape_str  = "others"
- 
+
+                final_decision = fuse_results(vision_result, material_result, weight)
+
                 compartment = MATERIAL_TO_COMPARTMENT.get(
                     final_decision, MATERIAL_TO_COMPARTMENT[Material.GENERAL_WASTE]
                 )
                 target_deg = compartment if isinstance(compartment, float) \
                              else float(compartment.value)
- 
+
                 print(f"\n[PIPELINE] ══════════════════════════════")
                 print(f"[PIPELINE]  FINAL DECISION : {final_decision.value}")
-                print(f"[PIPELINE]  MQTT PAYLOAD   : material={mqtt_mat_str}  "
-                      f"type={mqtt_shape_str}")
                 print(f"[PIPELINE]  COMPARTMENT    : {target_deg:.1f}°")
                 print(f"[PIPELINE] ══════════════════════════════")
- 
-                mqtt_publish_result(final_decision, mqtt_mat_str, mqtt_shape_str, weight)
+
+                mqtt_publish_result(final_decision, vision_result, weight)
                 _set_target(target_deg)
                 print(f"[PIPELINE] Arm in motion — waiting for cycle to complete...")
 
