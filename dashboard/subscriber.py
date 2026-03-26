@@ -66,7 +66,7 @@ DEFAULT_TOTALS = {
     "plastic": {"cans": 0, "bottles": 0},
     "metal": {"cans": 0, "bottles": 0},
     "glass": {"cans": 0, "bottles": 0},
-    "general": {"cans": 0, "bottles": 0},
+    "general": {"cans": 0, "bottles": 0, "others": 0},
     "tetra": {"cartons": 0}
 }
 
@@ -102,6 +102,8 @@ def on_message(client, userdata, msg):
             key_type = "bottles"
         elif "carton" in raw_type:
             key_type = "cartons"
+        elif "other" in raw_type:
+            key_type = "others"
         elif "can" in raw_type:
             key_type = "cans"
         else:
@@ -116,8 +118,14 @@ def on_message(client, userdata, msg):
         if mat not in stored_data["totals"]:
             if mat == "tetra":
                 stored_data["totals"][mat] = {"cartons": 0}
+            elif mat == "general":
+                stored_data["totals"][mat] = {"cans": 0, "bottles": 0, "others": 0}
             else:
                 stored_data["totals"][mat] = {"cans": 0, "bottles": 0}
+
+        if key_type == "others" and mat != "general":
+            print(f"⏭️ Ignored unsupported type for {mat}: {raw_type}")
+            return
 
         if key_type not in stored_data["totals"][mat]:
             stored_data["totals"][mat][key_type] = 0
