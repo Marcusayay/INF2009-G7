@@ -10,7 +10,7 @@ import numpy as np
 from utils import get_latest_number 
 
 #! download 
-file_to_save_in = "material-and-object-classifier-13"
+file_to_save_in = "material-and-object-classifier-14"
 train_dir = f"{file_to_save_in}/train"
 test_dir  = f"{file_to_save_in}/test"
 val_dir   = f"{file_to_save_in}/valid"
@@ -32,10 +32,8 @@ def download():
     if not os.path.exists(file_to_save_in):
         print ("📥 DOWNLOADING DATASET FROM ROBOFLOW..." )
         rf = Roboflow(api_key=api_key)
-        project = rf.workspace("zheng-fengs-workspace").project("material-object-classifier")
-        version = project.version(7)
-        # project = rf.workspace("zheng-fengs-workspace").project("trash_classifier-rw6qs")
-        # version = project.version(2)
+        project = rf.workspace("cloudcomputing-s-workspace").project("waste_classifier-e14pp")
+        version = project.version(2)
         dataset = version.download("folder", location=file_to_save_in)       
     else: 
         print("✅ DATASET ALREADY DOWNLOADED.")
