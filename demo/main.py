@@ -61,8 +61,8 @@ class Material(Enum):
 
 class Compartment(Enum):
     METAL         = 220
-    GLASS         = 290
-    PLASTIC       = 65
+    GLASS         = 65
+    PLASTIC       = 290
     GENERAL_WASTE = 120
 
 MATERIAL_TO_COMPARTMENT: dict[Material, Compartment] = {
@@ -107,8 +107,8 @@ RATIO  = 492.22
 OFFSET = 0
 WEIGHT_TRIGGER_THRESHOLD = 5.0
 
-METAL_CONTAMINATION_WEIGHT_LIMIT = 500.0
-PLASTIC_GLASS_WEIGHT_THRESHOLD = 100.0
+METAL_CONTAMINATION_WEIGHT_LIMIT = 20.0
+PLASTIC_GLASS_WEIGHT_THRESHOLD = 20.0
 
 
 # -- Inductive Sensor (SN04-N) --
@@ -252,7 +252,7 @@ else:
 # 1d. MQTT — publishes one message per classification cycle
 # =============================================================================
 
-MQTT_BROKER = "10.127.71.107"
+MQTT_BROKER = "10.17.125.107"
 MQTT_PORT   = 1883
 MQTT_TOPIC  = "pi/raw_transaction"
 

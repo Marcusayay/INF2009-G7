@@ -4,12 +4,12 @@ import math
 import RPi.GPIO as GPIO
 import time
 import subprocess
-subprocess.run(["v4l2-ctl", "--set-ctrl=auto_exposure=1"],        check=False)  # manual mode
-subprocess.run(["v4l2-ctl", "--set-ctrl=exposure_time_absolute=25"], check=False)  # very short
-subprocess.run(["v4l2-ctl", "--set-ctrl=brightness=255"],            check=False)
-subprocess.run(["v4l2-ctl", "--set-ctrl=gain=225"],  check=False)  # try this first
-subprocess.run(["v4l2-ctl", "--set-ctrl=white_balance_automatic=0"],       check=False)
-subprocess.run(["v4l2-ctl", "--set-ctrl=white_balance_temperature=6500"],   check=False)
+subprocess.run(["v4l2-ctl",  "-d", "/dev/video0", "--set-ctrl=auto_exposure=1"],        check=False)  # manual mode
+subprocess.run(["v4l2-ctl", "-d", "/dev/video0", "--set-ctrl=exposure_time_absolute=20"], check=False)  # very short
+# subprocess.run(["v4l2-ctl", "-d", "/dev/video0", "--set-ctrl=brightness=255"],            check=False)
+# subprocess.run(["v4l2-ctl", "-d", "/dev/video0", "--set-ctrl=gain=225"],  check=False)  # try this first
+subprocess.run(["v4l2-ctl", "-d", "/dev/video0", "--set-ctrl=white_balance_automatic=0"],       check=False)
+subprocess.run(["v4l2-ctl", "-d", "/dev/video0", "--set-ctrl=white_balance_temperature=6500"],   check=False)
 # =============================================================================
 # ARUCO MARKER DETECTION  — lightweight build for Pi
 #
