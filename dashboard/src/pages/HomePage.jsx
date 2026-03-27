@@ -317,7 +317,7 @@ export default function HomePage() {
       {/* Environmental Impact Banner */}
       <div className="bg-white border border-gray-200 p-4 rounded-lg flex justify-between items-center mb-10">
         <p className="text-blue-900 text-sm font-medium">
-          This BinIt has saved approximately <strong>{calculateCO2()}kg</strong> of CO2 since its operation.
+          This SCRAP bin has saved approximately <strong>{calculateCO2()}kg</strong> of CO2 since its operation.
         </p>
         <HiMiniSparkles className="text-blue-900" />
       </div>

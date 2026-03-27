@@ -54,7 +54,7 @@ export default function RootLayout() {
             <div className="flex items-center gap-2">
               <RiRecycleFill size={28} color="#61A075" />
               <span className="text-2xl font-semibold text-[#3b4b72] tracking-tight">
-                BinIt
+                SCRAP
               </span>
             </div>
 
