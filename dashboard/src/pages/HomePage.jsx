@@ -10,6 +10,8 @@ import mqtt from "mqtt";
 export default function HomePage() {
  
   const [selectedRange, setSelectedRange] = useState("Today");
+  const [brokerStatus, setBrokerStatus] = useState("connecting");
+  const [brokerError, setBrokerError] = useState("");
   const [todayResetAt, setTodayResetAt] = useState(() => {
     const saved = localStorage.getItem("todayResetAt");
     const parsed = saved ? Number(saved) : 0;
@@ -112,8 +114,27 @@ export default function HomePage() {
     const client = mqtt.connect("ws://localhost:9001");
 
     client.on("connect", () => {
+      setBrokerStatus("connected");
+      setBrokerError("");
       console.log("Connected to MQTT Broker ✅");
       client.subscribe("pi/material/#");
+    });
+
+    client.on("reconnect", () => {
+      setBrokerStatus("reconnecting");
+    });
+
+    client.on("offline", () => {
+      setBrokerStatus("offline");
+    });
+
+    client.on("close", () => {
+      setBrokerStatus("disconnected");
+    });
+
+    client.on("error", (err) => {
+      setBrokerStatus("error");
+      setBrokerError(err?.message || "Broker error");
     });
 
     client.on("message", (topic, message) => {
@@ -200,6 +221,36 @@ export default function HomePage() {
     ? buildCountsFromHistory(displayTransactions)
     : data;
 
+  const brokerStatusUI = {
+    connected: {
+      label: "Connected",
+      className: "border-emerald-200 bg-emerald-50 text-emerald-700"
+    },
+    connecting: {
+      label: "Connecting",
+      className: "border-amber-200 bg-amber-50 text-amber-700"
+    },
+    reconnecting: {
+      label: "Reconnecting",
+      className: "border-amber-200 bg-amber-50 text-amber-700"
+    },
+    offline: {
+      label: "Offline",
+      className: "border-orange-200 bg-orange-50 text-orange-700"
+    },
+    disconnected: {
+      label: "Disconnected",
+      className: "border-gray-200 bg-gray-100 text-gray-700"
+    },
+    error: {
+      label: "Error",
+      className: "border-red-200 bg-red-50 text-red-700"
+    }
+  }[brokerStatus] || {
+    label: "Unknown",
+    className: "border-gray-200 bg-gray-100 text-gray-700"
+  };
+
   return (
     <div className="py-8 px-10 bg-[#f8fafd]">
 
@@ -210,14 +261,24 @@ export default function HomePage() {
           defaultValue="Today"
           onChange={setSelectedRange}
         />
-        <button
-          type="button"
-          onClick={resetTodayStats}
-          className="w-full rounded-sm border border-red-300 bg-red-50 px-4 py-2 text-sm font-semibold text-red-700 transition hover:bg-red-100 sm:w-auto"
-        >
-          Reset Today Stats
-        </button>
+        <div className="flex w-full flex-col gap-2 sm:w-auto sm:flex-row sm:items-center">
+          <button
+            type="button"
+            onClick={resetTodayStats}
+            className="w-full rounded-sm border border-red-300 bg-red-50 px-4 py-2 text-sm font-semibold text-red-700 transition hover:bg-red-100 sm:w-auto"
+          >
+            Reset Today Stats
+          </button>
+          <div className={`inline-flex items-center gap-2 rounded-sm border px-3 py-2 text-sm font-medium ${brokerStatusUI.className}`}>
+            <span className="h-2 w-2 rounded-full bg-current opacity-80" />
+            <span>Broker: {brokerStatusUI.label}</span>
+          </div>
+        </div>
       </div>
+
+      {brokerStatus === "error" && brokerError ? (
+        <p className="mb-4 text-sm text-red-700">Broker error: {brokerError}</p>
+      ) : null}
 
       {/* Material Grid */}
       <div className="grid grid-cols-1 xl:grid-cols-4 gap-6 mb-6">
