@@ -10,6 +10,11 @@ import mqtt from "mqtt";
 export default function HomePage() {
  
   const [selectedRange, setSelectedRange] = useState("Today");
+  const [todayResetAt, setTodayResetAt] = useState(() => {
+    const saved = localStorage.getItem("todayResetAt");
+    const parsed = saved ? Number(saved) : 0;
+    return Number.isFinite(parsed) ? parsed : 0;
+  });
 
   const [data, setData] = useState({
     plastic: { bottles: 0 },
@@ -21,8 +26,30 @@ export default function HomePage() {
 
   const [transactions, setTransactions] = useState([]);
 
+  const getTransactionTime = (tx) => {
+    if (tx?.id) {
+      const idTime = Number(tx.id);
+      if (!Number.isNaN(idTime)) return idTime;
+    }
+
+    const dateMatch = (tx?.timestamp || "").match(/^(\d{2})\/(\d{2})\/(\d{4})/);
+    if (!dateMatch) return null;
+
+    const [, dd, mm, yyyy] = dateMatch;
+    return new Date(Number(yyyy), Number(mm) - 1, Number(dd)).getTime();
+  };
+
   const isTransactionFromToday = (tx) => {
     const now = new Date();
+    const txTime = getTransactionTime(tx);
+
+    if (todayResetAt > 0 && txTime !== null && txTime < todayResetAt) {
+      return false;
+    }
+
+    if (todayResetAt > 0 && txTime === null) {
+      return false;
+    }
 
     if (tx?.id) {
       const idDate = new Date(Number(tx.id));
@@ -143,6 +170,12 @@ export default function HomePage() {
     return () => client.end();
   }, []);
 
+  const resetTodayStats = () => {
+    const resetTime = Date.now();
+    setTodayResetAt(resetTime);
+    localStorage.setItem("todayResetAt", String(resetTime));
+  };
+
    const calculateCO2 = () => {
       const displayData = selectedRange === "Today"
         ? buildCountsFromHistory(transactions.filter(isTransactionFromToday))
@@ -171,11 +204,20 @@ export default function HomePage() {
     <div className="py-8 px-10 bg-[#f8fafd]">
 
       {/* Toggle Selector */}
-      <Toggle
-        options={["Lifetime", "Today"]}
-        defaultValue="Today"
-        onChange={setSelectedRange}
-      />
+      <div className="mb-6 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+        <Toggle
+          options={["Lifetime", "Today"]}
+          defaultValue="Today"
+          onChange={setSelectedRange}
+        />
+        <button
+          type="button"
+          onClick={resetTodayStats}
+          className="w-full rounded-sm border border-red-300 bg-red-50 px-4 py-2 text-sm font-semibold text-red-700 transition hover:bg-red-100 sm:w-auto"
+        >
+          Reset Today Stats
+        </button>
+      </div>
 
       {/* Material Grid */}
       <div className="grid grid-cols-1 xl:grid-cols-4 gap-6 mb-6">
