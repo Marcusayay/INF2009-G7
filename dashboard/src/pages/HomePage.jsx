@@ -252,10 +252,10 @@ export default function HomePage() {
   };
 
   return (
-    <div className="py-8 px-10 bg-[#f8fafd]">
+    <div className="py-4 px-10 bg-[#f8fafd]">
 
       {/* Toggle Selector */}
-      <div className="mb-6 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+      <div className="mb-3 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
         <Toggle
           options={["Lifetime", "Today"]}
           defaultValue="Today"
