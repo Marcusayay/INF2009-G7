@@ -185,6 +185,7 @@ current_speed_20   = -1.0
 target_angle_20    = None
 outbound_direction = None
 is_homing          = False
+_initial_diff_sign = None   # sign of diff when target was first approached
 HOME_ANGLE         = 85
 calibration_mode   = False
 
@@ -345,9 +346,10 @@ _aruco_params.minDistanceToBorder            = 1
 
 _aruco_detector = cv2.aruco.ArucoDetector(_aruco_dict, _aruco_params)
 
-ARUCO_UPSCALE    = 2
-DETECT_EVERY_N   = 2    # run detector every N frames, hold last result in between
-TRACKING_TIMEOUT = 2.0  # seconds before watchdog stops motor on marker loss
+ARUCO_UPSCALE      = 2
+DETECT_EVERY_N     = 2    # run detector every N frames, hold last result in between
+TRACKING_TIMEOUT   = 0.5  # seconds to hold last known angle on skip frames before forcing true detection
+MARKER_LOSS_PAUSE  = 0.3  # seconds of marker loss before pausing motor to reacquire
 
 _daemon_frame_ctr  = 0
 _last_good_corners = None
@@ -444,9 +446,10 @@ def decelerated_speed(direction, distance):
     return round(SPEED_NEUTRAL + t * (direction - SPEED_NEUTRAL), 2)
 
 def _set_target(angle):
-    global target_angle_20, outbound_direction, is_homing
+    global target_angle_20, outbound_direction, is_homing, _initial_diff_sign
     target_angle_20    = float(angle) % 360
     is_homing          = False
+    _initial_diff_sign = None   # will be captured on first motor-control tick
     outbound_direction = (SPEED_BWD
                           if target_angle_20 == float(Compartment.GENERAL_WASTE.value)
                           else SPEED_FWD)
@@ -894,7 +897,10 @@ def servo_tracking_daemon():
         if not marker_found:
             elapsed = time.time() - last_marker_seen
             if elapsed > TRACKING_TIMEOUT and target_angle_20 is not None:
-                print(f"[DAEMON] Marker lost {elapsed:.1f} s — stopping motor")
+                print(f"[DAEMON] Marker lost {elapsed:.1f} s — truly lost, awaiting reacquisition")
+            elif elapsed > MARKER_LOSS_PAUSE and target_angle_20 is not None:
+                # Pause briefly so the camera can reacquire the marker.
+                # Target is preserved — motor resumes once marker_found again.
                 set_speed_20(SPEED_STOP)
 
         # --- Motor control ---------------------------------------------------
@@ -949,8 +955,9 @@ def servo_tracking_daemon():
                             break
                         time.sleep(0.01)
 
-                    target_angle_20 = HOME_ANGLE
-                    is_homing       = True
+                    target_angle_20    = HOME_ANGLE
+                    is_homing          = True
+                    _initial_diff_sign = None   # reset for homing leg
                 else:
                     print(f"[DAEMON] HOME REACHED at {current_angle_20:.1f}°  "
                           f"(target={HOME_ANGLE}°  dist={dist:.1f}°)  System idle.")
@@ -958,7 +965,19 @@ def servo_tracking_daemon():
                     outbound_direction = None
                     is_homing          = False
             else:
-                    set_speed_20(decelerated_speed(outbound_direction, dist))
+                    # Capture the initial diff sign on the first tick so we
+                    # can detect a true overshoot (sign flip) later.
+                    if _initial_diff_sign is None:
+                        _initial_diff_sign = 1 if diff >= 0 else -1
+                    current_diff_sign = 1 if diff >= 0 else -1
+                    # Overshoot: diff has crossed zero past the target.
+                    # Reverse using outbound_direction to correct; once the
+                    # sign matches again the servo is back on track.
+                    if current_diff_sign != _initial_diff_sign:
+                        effective_dir = SPEED_BWD if outbound_direction == SPEED_FWD else SPEED_FWD
+                    else:
+                        effective_dir = outbound_direction
+                    set_speed_20(decelerated_speed(effective_dir, dist))
 
         time.sleep(0.01)
 
