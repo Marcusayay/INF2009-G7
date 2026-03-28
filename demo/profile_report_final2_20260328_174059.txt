@@ -1,0 +1,8 @@
+Profile report — 2026-03-28 17:40:59
+Output file    : /home/marcus/Documents/GitHub/INF2009-G7/demo/profile_report_final2_20260328_174059.txt
+
+[PROFILER] PID = 25592
+[PROFILER] To capture hardware counters, open a second terminal and run:
+[PROFILER]   sudo perf stat -p 25592 \
+[PROFILER]       -e cycles,instructions,cache-references,cache-misses,branches,branch-misses
+[PROFILER] Press Enter here once perf stat is running (or skip with Enter)...
