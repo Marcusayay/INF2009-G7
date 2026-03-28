@@ -54,7 +54,7 @@ export default function RootLayout() {
             <div className="flex items-center gap-2">
               <RiRecycleFill size={28} color="#61A075" />
               <span className="text-2xl font-semibold text-[#3b4b72] tracking-tight">
-                BinIt
+                SCRAP
               </span>
             </div>
 
@@ -78,13 +78,13 @@ export default function RootLayout() {
       </main>
 
       {/* Simplified Footer */}
-      <footer className="bg-white  fixed w-full z-30 bottom-0 start-0 border-t border-gray-200 p-8">
+      {/* <footer className="bg-white  fixed w-full z-30 bottom-0 start-0 border-t border-gray-200 p-8">
         <div className="mx-auto text-center">
           <p className="text-sm text-gray-400">
             © 2026 BinIt System. Data tracked for smart recycling.
           </p>
         </div>
-      </footer>
+      </footer> */}
     </div>
   );
 }
