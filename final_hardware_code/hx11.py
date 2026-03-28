@@ -37,20 +37,54 @@ def tare():
     OFFSET = get_steady_weight(20)
     print(f"Tare complete. Offset: {OFFSET}")
 
+def calibrate():
+    global OFFSET, RATIO
+    hx.reset()
+
+    print("\n=== STEP 1: TARE ===")
+    print("Make sure the scale is empty, then press Enter...")
+    input()
+    OFFSET = get_steady_weight(30)
+    print(f"Tare offset: {OFFSET:.0f}")
+
+    print("\n=== STEP 2: KNOWN WEIGHT ===")
+    known = float(input("Enter the exact weight of your reference object in grams: "))
+    print(f"Place the {known}g object on the scale, then press Enter...")
+    input()
+    raw_loaded = get_steady_weight(30)
+    RATIO = (raw_loaded - OFFSET) / known
+    print(f"\nRaw loaded : {raw_loaded:.0f}")
+    print(f"New RATIO  : {RATIO:.2f}")
+
+    print("\n=== STEP 3: VERIFY ===")
+    print("Readings (Ctrl+C to stop):")
+    try:
+        while True:
+            raw_val = get_steady_weight(20)
+            weight = (raw_val - OFFSET) / RATIO
+            print(f"Raw: {raw_val:.0f} | Weight: {weight:.2f}g")
+            time.sleep(0.5)
+    except KeyboardInterrupt:
+        pass
+
+    print(f"\n>>> Update main.py with:")
+    print(f"    RATIO  = {RATIO:.2f}")
+    print(f"    OFFSET = 0   (tare is called at startup)")
+
 def main():
     try:
         hx.reset()
         tare()
-        
+
         print("\n--- Starting Measurement ---")
         while True:
             raw_val = get_steady_weight(20)
-            
+
             # The Magic Formula: (Raw Value - Zero Reading) / Calibration Factor
             weight = (raw_val - OFFSET) / RATIO
-            
+
             print(f"Raw: {raw_val:.0f} | Weight: {weight:.2f}g")
-            
+
             time.sleep(0.5)
 
     except (KeyboardInterrupt, SystemExit):
@@ -58,4 +92,8 @@ def main():
         sys.exit()
 
 if __name__ == "__main__":
-    main()
+    import sys
+    if len(sys.argv) > 1 and sys.argv[1] == "calibrate":
+        calibrate()
+    else:
+        main()

@@ -2,7 +2,7 @@ import os
 
 def return_latest_version_path(model: str,) : 
     if model == "mobilenet":
-        model_dir = "mobnet_models"
+        model_dir = "../Train/mobnet_models"
         existing_versions = [d for d in os.listdir(model_dir) if d.startswith("v")]
         if not existing_versions: 
             return None, None  # No existing models 

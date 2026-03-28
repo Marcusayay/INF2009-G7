@@ -19,16 +19,16 @@ os.chdir(os.path.dirname(os.path.abspath(__file__)))
 
 import subprocess
 
-subprocess.run(["v4l2-ctl", "-d", "/dev/video_vision", "--set-ctrl=auto_exposure=3"],          check=False)
-subprocess.run(["v4l2-ctl", "-d", "/dev/video_vision", "--set-ctrl=brightness=128"],            check=False)
-subprocess.run(["v4l2-ctl", "-d", "/dev/video_vision", "--set-ctrl=gain=0"],                   check=False)
-subprocess.run(["v4l2-ctl", "-d", "/dev/video_vision", "--set-ctrl=white_balance_automatic=1"], check=False)
-subprocess.run(["v4l2-ctl", "-d", "/dev/video_tracking", "--set-ctrl=auto_exposure=1"],               check=False)
-subprocess.run(["v4l2-ctl", "-d", "/dev/video_tracking", "--set-ctrl=exposure_time_absolute=25"],      check=False)
-subprocess.run(["v4l2-ctl", "-d", "/dev/video_tracking", "--set-ctrl=brightness=255"],                 check=False)
-subprocess.run(["v4l2-ctl", "-d", "/dev/video_tracking", "--set-ctrl=gain=200"],                       check=False)
-subprocess.run(["v4l2-ctl", "-d", "/dev/video_tracking", "--set-ctrl=white_balance_automatic=0"],      check=False)
-subprocess.run(["v4l2-ctl", "-d", "/dev/video_tracking", "--set-ctrl=white_balance_temperature=6500"], check=False)
+subprocess.run(["v4l2-ctl", "-d", "/dev/video2", "--set-ctrl=auto_exposure=3"],          check=False)
+subprocess.run(["v4l2-ctl", "-d", "/dev/video2", "--set-ctrl=brightness=128"],            check=False)
+subprocess.run(["v4l2-ctl", "-d", "/dev/video2", "--set-ctrl=gain=0"],                   check=False)
+subprocess.run(["v4l2-ctl", "-d", "/dev/video2", "--set-ctrl=white_balance_automatic=1"], check=False)
+subprocess.run(["v4l2-ctl", "-d", "/dev/video0", "--set-ctrl=auto_exposure=1"],               check=False)
+subprocess.run(["v4l2-ctl", "-d", "/dev/video0", "--set-ctrl=exposure_time_absolute=25"],      check=False)
+subprocess.run(["v4l2-ctl", "-d", "/dev/video0", "--set-ctrl=brightness=255"],                 check=False)
+subprocess.run(["v4l2-ctl", "-d", "/dev/video0", "--set-ctrl=gain=200"],                       check=False)
+subprocess.run(["v4l2-ctl", "-d", "/dev/video0", "--set-ctrl=white_balance_automatic=0"],      check=False)
+subprocess.run(["v4l2-ctl", "-d", "/dev/video0", "--set-ctrl=white_balance_temperature=6500"], check=False)
 
 # =============================================================================
 # NOTE: setMouseCallback is NOT used anywhere in this file.
@@ -110,9 +110,9 @@ def correct_frame(frame):
 
 # -- Weight Sensor (HX711) --
 hx = HX711(dout_pin=15, pd_sck_pin=14)
-RATIO  = 112.36
+RATIO  = 120.20
 OFFSET = 0
-WEIGHT_TRIGGER_THRESHOLD = 3.0
+WEIGHT_TRIGGER_THRESHOLD = 5.0
 
 METAL_CONTAMINATION_WEIGHT_LIMIT = 40.0
 PLASTIC_GLASS_WEIGHT_THRESHOLD = 25.0
@@ -176,7 +176,7 @@ pwm21.start(0)
 
 MOTOR_DIRECTION_SIGN                             = 1
 SPEED_BWD, SPEED_FWD, SPEED_NEUTRAL, SPEED_STOP = 9.0, 6.0, 7.5, 0
-DECEL_START, DECEL_NEAR, CRAWL_FACTOR            = 60, 25, 0.15
+DECEL_START, DECEL_NEAR, CRAWL_FACTOR            = 60, 25,0.5
 ANGLE_TOLERANCE                                  = 12
 
 last_angle_21      = -1
@@ -185,7 +185,6 @@ current_speed_20   = -1.0
 target_angle_20    = None
 outbound_direction = None
 is_homing          = False
-_initial_diff_sign = None   # sign of diff when target was first approached
 HOME_ANGLE         = 85
 calibration_mode   = False
 
@@ -199,29 +198,30 @@ center_x, center_y = 169, 113
 # =============================================================================
 # 1b. CAMERAS
 #
-#   cap_tracking  (/dev/video_tracking) — servo tracking daemon, 320×240
-#   cap_vision    (/dev/video_vision)   — MobileNet inference,   640×480
+#   cap_tracking  (index 0) — servo tracking daemon, 320×240
+#   cap_vision    (index 2) — MobileNet inference,   640×480
 # =============================================================================
 
 # -- Tracking camera (rotation arm) --
-cap_tracking = cv2.VideoCapture("/dev/video_tracking")
+cap_tracking = cv2.VideoCapture(0)
 cap_tracking.set(cv2.CAP_PROP_FRAME_WIDTH,  320)
 cap_tracking.set(cv2.CAP_PROP_FRAME_HEIGHT, 240)
 cap_tracking.set(cv2.CAP_PROP_BUFFERSIZE,   1)
 # cap_tracking.set(cv2.CAP_PROP_AUTO_EXPOSURE, 1)
 # cap_tracking.set(cv2.CAP_PROP_EXPOSURE,     -5)
 if not cap_tracking.isOpened():
-    print("[ERROR] Cannot open tracking camera. Check /dev/video_tracking.")
+    print("[ERROR] Cannot open tracking camera (index 0). Check /dev/video0.")
     sys.exit(1)
 
 # -- Vision camera (object classification) --
-cap_vision = cv2.VideoCapture("/dev/video_vision")
+VISION_CAM_INDEX = 2
+cap_vision = cv2.VideoCapture(VISION_CAM_INDEX)
 cap_vision.set(cv2.CAP_PROP_FRAME_WIDTH,  640)
 cap_vision.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
 cap_vision.set(cv2.CAP_PROP_BUFFERSIZE, 1)
 if not cap_vision.isOpened():
-    print("[WARNING] Vision camera (/dev/video_vision) not available — "
-          "vision path will be skipped.")
+    print(f"[WARNING] Vision camera (index {VISION_CAM_INDEX}) not available — "
+          f"vision path will be skipped.")
     cap_vision = None
 
 
@@ -236,11 +236,12 @@ VISION_QUANTIZED               = True
 
 VISION_BUFFER_THRESHOLD = 10
 VISION_FREQ_THRESHOLD   = 7
-VISION_CONF_THRESHOLD   = 0.70
-VISION_TIMEOUT_S        = 1.0
+VISION_CONF_THRESHOLD   = 0.89
+VISION_TIMEOUT_S        = 10.0
 
 print("[VISION] Loading MobileNet model...")
 latest_model_path, _ = return_latest_version_path("mobilenet")
+print(f"[VISION] Model path: {latest_model_path}")
 vision_model, vision_input_details, vision_output_details, _vision_model_path = load_model(
     quantized=VISION_QUANTIZED,
     model_path=latest_model_path,
@@ -306,7 +307,7 @@ def mqtt_publish_result(final_material, mqtt_material_str: str,
     payload = {
         "material": mqtt_material_str,
         "type":     mqtt_shape_str,
-        "weight":   f"{weight_g:.1f}g",
+        "weight":   f"{abs(weight_g):.1f}g",
     }
     try:
         result = mqtt_client.publish(MQTT_TOPIC, json.dumps(payload))
@@ -345,10 +346,9 @@ _aruco_params.minDistanceToBorder            = 1
 
 _aruco_detector = cv2.aruco.ArucoDetector(_aruco_dict, _aruco_params)
 
-ARUCO_UPSCALE      = 2
-DETECT_EVERY_N     = 2    # run detector every N frames, hold last result in between
-TRACKING_TIMEOUT   = 0.5  # seconds to hold last known angle on skip frames before forcing true detection
-MARKER_LOSS_PAUSE  = 0.3  # seconds of marker loss before pausing motor to reacquire
+ARUCO_UPSCALE    = 2
+DETECT_EVERY_N   = 2    # run detector every N frames, hold last result in between
+TRACKING_TIMEOUT = 2.0  # seconds before watchdog stops motor on marker loss
 
 _daemon_frame_ctr  = 0
 _last_good_corners = None
@@ -445,10 +445,9 @@ def decelerated_speed(direction, distance):
     return round(SPEED_NEUTRAL + t * (direction - SPEED_NEUTRAL), 2)
 
 def _set_target(angle):
-    global target_angle_20, outbound_direction, is_homing, _initial_diff_sign
+    global target_angle_20, outbound_direction, is_homing
     target_angle_20    = float(angle) % 360
     is_homing          = False
-    _initial_diff_sign = None   # will be captured on first motor-control tick
     outbound_direction = (SPEED_BWD
                           if target_angle_20 == float(Compartment.GENERAL_WASTE.value)
                           else SPEED_FWD)
@@ -471,8 +470,8 @@ def _iqr_clean(vals: list) -> list:
     return clean if clean else s
 def tare_scale():
     global OFFSET
-    print("[SCALE]  Taring — ensure platform is empty...")
-    time.sleep(1)
+    input("[SCALE]  Ensure platform is EMPTY then press Enter to tare...")
+    time.sleep(3)
     with _hx711_lock:
         vals = hx.get_raw_data(20)
     if vals:
@@ -483,6 +482,23 @@ def tare_scale():
               f"dropped={dropped}/{len(vals)}  RATIO={RATIO}")
     else:
         print("[SCALE]  Tare FAILED — no data from HX711")
+
+def calibrate_ratio():
+    global RATIO
+    known = float(input("[SCALE]  Enter known weight in grams (e.g. 500): "))
+    input(f"[SCALE]  Place the {known:.0f}g object on the scale then press Enter...")
+    time.sleep(1.5)
+    with _hx711_lock:
+        vals = hx.get_raw_data(20)
+    if not vals:
+        print("[SCALE]  Calibration FAILED — no data")
+        return
+    clean = _iqr_clean(vals)
+    raw   = sum(clean) / len(clean)
+    RATIO = (raw - OFFSET) / known
+    print(f"[SCALE]  Calibration complete.  raw={raw:.0f}  RATIO={RATIO:.2f}")
+    input("[SCALE]  Remove the object then press Enter...")
+
 def get_weight() -> float:
     with _hx711_lock:
         vals = hx.get_raw_data(20)
@@ -851,10 +867,9 @@ def servo_tracking_daemon():
     global current_angle_20, target_angle_20, outbound_direction, is_homing
     global _latest_frame, _daemon_frame_ctr, _last_good_corners
 
-    last_marker_seen   = time.time()
-    _last_log_time     = 0.0
-    _last_tape_state   = None
-    _initial_diff_sign = None
+    last_marker_seen = time.time()
+    _last_log_time   = 0.0
+    _last_tape_state = None
 
     while True:
         if _tracking_pause.is_set():
@@ -891,17 +906,17 @@ def servo_tracking_daemon():
             current_angle_20 = detected_angle
 
         if marker_found != _last_tape_state:
+            if marker_found and _last_tape_state is not None:
+                print(f"[DAEMON] Marker reacquired at {current_angle_20:.1f}° — resuming")
             _last_tape_state = marker_found
 
         # --- Watchdog --------------------------------------------------------
         if not marker_found:
+            if target_angle_20 is not None:
+                set_speed_20(SPEED_STOP)
             elapsed = time.time() - last_marker_seen
             if elapsed > TRACKING_TIMEOUT and target_angle_20 is not None:
-                print(f"[DAEMON] Marker lost {elapsed:.1f} s — truly lost, awaiting reacquisition")
-            elif elapsed > MARKER_LOSS_PAUSE and target_angle_20 is not None:
-                # Pause briefly so the camera can reacquire the marker.
-                # Target is preserved — motor resumes once marker_found again.
-                set_speed_20(SPEED_STOP)
+                print(f"[DAEMON] Marker lost {elapsed:.1f} s — paused, awaiting reacquisition")
 
         # --- Motor control ---------------------------------------------------
         if target_angle_20 is not None and marker_found:
@@ -955,9 +970,8 @@ def servo_tracking_daemon():
                             break
                         time.sleep(0.01)
 
-                    target_angle_20    = HOME_ANGLE
-                    is_homing          = True
-                    _initial_diff_sign = None   # reset for homing leg
+                    target_angle_20 = HOME_ANGLE
+                    is_homing       = True
                 else:
                     print(f"[DAEMON] HOME REACHED at {current_angle_20:.1f}°  "
                           f"(target={HOME_ANGLE}°  dist={dist:.1f}°)  System idle.")
@@ -965,21 +979,7 @@ def servo_tracking_daemon():
                     outbound_direction = None
                     is_homing          = False
             else:
-                    # Capture the initial diff sign on the first tick so we
-                    # can detect a true overshoot (sign flip) later.
-                    if _initial_diff_sign is None:
-                        _initial_diff_sign = 1 if diff >= 0 else -1
-                    current_diff_sign = 1 if diff >= 0 else -1
-                    # Overshoot: diff has crossed zero past the target.
-                    # Reverse using outbound_direction to correct; once the
-                    # sign matches again the servo is back on track.
-                    if current_diff_sign != _initial_diff_sign:
-                        effective_dir = SPEED_BWD if outbound_direction == SPEED_FWD else SPEED_FWD
-                        # Always crawl during correction — cap dist so CRAWL_FACTOR is used
-                        # regardless of how far past the target the arm was detected
-                        set_speed_20(decelerated_speed(effective_dir, DECEL_NEAR - 1))
-                    else:
-                        set_speed_20(decelerated_speed(outbound_direction, dist))
+                    set_speed_20(decelerated_speed(outbound_direction, dist))
 
         time.sleep(0.01)
 
@@ -1283,29 +1283,13 @@ def fuse_results(
         print(f"[FUSION] Disposable cup, non-metal → GENERAL_WASTE/others")
         return Material.GENERAL_WASTE, "general", "others"
  
-    # --- Step 6: Vision vs spectrometer agreement / weight tiebreaker ---------
-    # Vision material hint is "glass" or "plastic"
-    # Spectrometer result is Material.GLASS or Material.PLASTIC
-    spec_str   = spec_material.value.lower()   # "glass" or "plastic"
- 
-    if mqtt_mat_hint == spec_str:
-        # --- Agreement ---
-        final = spec_material
-        print(f"[FUSION] ✓ Vision ({mqtt_mat_hint}) & spectrometer ({spec_str}) agree "
-              f"→ {final.value}/bottle")
+    # --- Step 6: Weight is final arbiter for plastic vs glass ------------------
+    if weight_g >= PLASTIC_GLASS_WEIGHT_THRESHOLD:
+        final = Material.GLASS
+        print(f"[FUSION] ✓ Weight {weight_g:.1f} g ≥ {PLASTIC_GLASS_WEIGHT_THRESHOLD} g → GLASS")
     else:
-        # --- Disagreement → weight tiebreaker --------------------------------
-        print(f"[FUSION] ⚠ Disagreement:  vision={mqtt_mat_hint}  "
-              f"spec={spec_str}  spec_conf={spec_confidence:.1f}%")
-        print(f"[FUSION]   Weight tiebreaker: {weight_g:.1f} g  "
-              f"threshold={PLASTIC_GLASS_WEIGHT_THRESHOLD} g")
- 
-        if weight_g >= PLASTIC_GLASS_WEIGHT_THRESHOLD:
-            final = Material.GLASS
-            print(f"[FUSION]   Weight ≥ threshold → overriding to GLASS")
-        else:
-            final = Material.PLASTIC
-            print(f"[FUSION]   Weight < threshold → overriding to PLASTIC")
+        final = Material.PLASTIC
+        print(f"[FUSION] ✓ Weight {weight_g:.1f} g < {PLASTIC_GLASS_WEIGHT_THRESHOLD} g → PLASTIC")
  
     mqtt_final = "glass" if final == Material.GLASS else "plastic"
     print(f"[FUSION] ✓ Final → {final.value}/{mqtt_final}/bottle")
@@ -1320,7 +1304,7 @@ def path_1_vision_model() -> str:
     if cap_vision is None:
         print("[PATH 1] Vision camera not available — returning 'unknown'")
         return "unknown"
-    print("[PATH 1] Starting vision inference on /dev/video_vision...")
+    print(f"[PATH 1] Starting vision inference on camera index {VISION_CAM_INDEX}...")
 
     buffer      = []
     frame_count = 0
@@ -1470,6 +1454,7 @@ def main_pipeline():
 
     hx.reset()
     tare_scale()
+    calibrate_ratio()
     # calibrate_weight_thresholds()
 
     # calibrate_center_point()
@@ -1485,6 +1470,7 @@ def main_pipeline():
         print("[SYSTEM] Spectrometer not available — skipping step 3.")
 
     set_angle_instant_21(0)
+
 
     print("\n" + "=" * 60)
     print("  ALL CALIBRATION COMPLETE")
@@ -1506,28 +1492,27 @@ def main_pipeline():
                       f"{'TRIGGERED' if metal_sensor.value == 0 else 'CLEAR'}")
                 print("=" * 60)
 
-                def _settled_weight():
-                    time.sleep(2.0)
-                    w = get_weight()
-                    print(f"[PIPELINE] Settled weight: {w:.1f} g")
-                    return w
-
                 print("\n[PIPELINE] Launching parallel detection paths...")
-                _tracking_pause.set()   # pause daemon — frees CPU for HX711 + inference
+                _tracking_pause.set()
                 t_start = time.time()
                 try:
-                    with concurrent.futures.ThreadPoolExecutor(max_workers=3) as ex:
+                    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as ex:
                         fv = ex.submit(path_1_vision_model)
                         fm = ex.submit(path_2_material_detection)
-                        fw = ex.submit(_settled_weight)
                         vision_result              = fv.result()
                         material_result, spec_conf = fm.result()
-                        weight                     = fw.result()
                 except Exception as e:
                     print(f"[PIPELINE] ✗ Detection path failed: {e} — defaulting to GENERAL_WASTE/others")
                     _tracking_pause.clear()
                     _set_target(float(MATERIAL_TO_COMPARTMENT[Material.GENERAL_WASTE].value))
                     continue
+
+                # Read weight after detection — scale has been settling during
+                # the entire detection duration, no extra sleep needed,
+                # and no CPU contention with HX711 bit-bang
+                time.sleep(0.5)
+                weight = get_weight()
+                print(f"[PIPELINE] Settled weight: {weight:.1f} g")
 
                 # Guard None return from vision (timeout with empty buffer)
                 if vision_result is None or vision_result == "unknown":
