@@ -22,7 +22,7 @@ harness runs without real peripherals attached.
 # ---------------------------------------------------------------------------
 # 0.  Output — redirect all print() and pstats output to a timestamped file
 # ---------------------------------------------------------------------------
-import sys, os, datetime
+import sys, os, datetime, time as _time_mod
 
 REPORT_PATH = os.path.join(
     os.path.dirname(os.path.abspath(__file__)),
@@ -48,6 +48,32 @@ sys.stdout = _tee
 
 print(f"Profile report — {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 print(f"Output file    : {REPORT_PATH}\n")
+
+# ---------------------------------------------------------------------------
+# 0a.  Script-wide timing and RSS memory tracker
+# ---------------------------------------------------------------------------
+_t_script_start = _time_mod.perf_counter()
+
+try:
+    import psutil as _psutil
+    _SELF_PROC = _psutil.Process()
+    def _rss_mb():
+        return _SELF_PROC.memory_info().rss / 1024**2
+except ImportError:
+    _psutil = None
+    try:
+        import resource as _resource
+        def _rss_mb():
+            # Linux: ru_maxrss is in kB; macOS: bytes
+            import platform
+            kb = _resource.getrusage(_resource.RUSAGE_SELF).ru_maxrss
+            return kb / 1024 if platform.system() == "Linux" else kb / 1024**2
+    except ImportError:
+        def _rss_mb():
+            return float("nan")
+
+_rss_baseline = _rss_mb()
+print(f"[PROFILER] RSS baseline : {_rss_baseline:.1f} MB\n")
 
 # ---------------------------------------------------------------------------
 # 0b.  perf stat — print PID and pause so the user can attach externally
@@ -312,13 +338,6 @@ VISION_LABELS = [
 # 4.  Functions under test
 # ---------------------------------------------------------------------------
 BENCHMARKS = {
-    # ── Color correction (tracking camera) ────────────────────────────────
-    "correct_frame": dict(
-        fn  = lambda: pipeline.correct_frame(FRAME_320x240),
-        n   = 500,
-        doc = "Per-frame white-balance LUT (BGR channels, 320×240)",
-    ),
-
     # ── IQR weight cleaning ───────────────────────────────────────────────
     "_iqr_clean": dict(
         fn  = lambda: pipeline._iqr_clean(RAW_DATA_20),
@@ -418,31 +437,43 @@ BENCHMARKS = {
 # ---------------------------------------------------------------------------
 import timeit, io, cProfile, pstats
 
+_t_sA_start  = _time_mod.perf_counter()
+_rss_sA_start = _rss_mb()
+
 print("=" * 72)
 print("  SECTION A — timeit MICROBENCHMARKS")
 print("=" * 72)
-print(f"{'Function':<32}  {'N':>6}  {'Total(s)':>10}  {'Per-call(µs)':>13}  Note")
-print("-" * 72)
+print(f"{'Function':<32}  {'N':>6}  {'Total(s)':>10}  {'Per-call(µs)':>13}  {'ΔRSS(MB)':>9}  Note")
+print("-" * 84)
 
 timeit_results = {}
 for name, cfg in BENCHMARKS.items():
     fn  = cfg["fn"]
     n   = cfg["n"]
     try:
+        _rss_before = _rss_mb()
         total_s = timeit.timeit(fn, number=n)
+        _drss   = _rss_mb() - _rss_before
         per_us  = (total_s / n) * 1e6
-        timeit_results[name] = {"total_s": total_s, "per_us": per_us, "n": n}
+        timeit_results[name] = {"total_s": total_s, "per_us": per_us, "n": n,
+                                "drss_mb": _drss}
         flag = "  ⚠  SLOW" if per_us > 5000 else ""
-        print(f"  {name:<30}  {n:>6}  {total_s:>10.4f}  {per_us:>11.2f} µs{flag}")
+        print(f"  {name:<30}  {n:>6}  {total_s:>10.4f}  {per_us:>11.2f} µs  {_drss:>+7.1f} MB{flag}")
     except Exception as exc:
         print(f"  {name:<30}  ERROR: {exc}")
         timeit_results[name] = {"error": str(exc)}
 
+_t_sA    = _time_mod.perf_counter() - _t_sA_start
+_rss_sA  = _rss_mb()
+print(f"\n  [Section A] wall time = {_t_sA:.3f} s   RSS now = {_rss_sA:.1f} MB  (Δ {_rss_sA - _rss_sA_start:+.1f} MB)")
 print()
 
 # ---------------------------------------------------------------------------
 # 5b.  cProfile — full pipeline simulation
 # ---------------------------------------------------------------------------
+_t_sB_start  = _time_mod.perf_counter()
+_rss_sB_start = _rss_mb()
+
 print("=" * 72)
 print("  SECTION B — cProfile CALL GRAPH  (50 simulated classifications)")
 print("=" * 72)
@@ -450,7 +481,6 @@ print("=" * 72)
 def _simulate_pipeline(n_cycles=50):
     for _ in range(n_cycles):
         pipeline._iqr_clean(RAW_DATA_20[:])
-        pipeline.correct_frame(FRAME_320x240)
         pipeline._aruco_preprocess(FRAME_320x240)
         pipeline.detect_aruco_angle(FRAME_320x240)
         pipeline.shortest_angle_diff(85.0, 220.0)
@@ -486,11 +516,18 @@ print(_stream.getvalue())
 _prof_path = os.path.join(_pipeline_dir, "main_final2.prof")
 _prof.dump_stats(_prof_path)
 print(f"[cProfile] Binary .prof written → {_prof_path}")
-print(f"           View interactively:   snakeviz {_prof_path}\n")
+print(f"           View interactively:   snakeviz {_prof_path}")
+
+_t_sB   = _time_mod.perf_counter() - _t_sB_start
+_rss_sB = _rss_mb()
+print(f"\n  [Section B] wall time = {_t_sB:.3f} s   RSS now = {_rss_sB:.1f} MB  (Δ {_rss_sB - _rss_sB_start:+.1f} MB)\n")
 
 # ---------------------------------------------------------------------------
 # 5c.  CodeCarbon — emissions per logical block
 # ---------------------------------------------------------------------------
+_t_sC_start  = _time_mod.perf_counter()
+_rss_sC_start = _rss_mb()
+
 print("=" * 72)
 print("  SECTION C — CodeCarbon EMISSIONS TRACKER")
 print("=" * 72)
@@ -551,11 +588,17 @@ except Exception as e:
     print(f"  [WARN] CodeCarbon error: {e}")
     carbon_results = {}
 
+_t_sC   = _time_mod.perf_counter() - _t_sC_start
+_rss_sC = _rss_mb()
+print(f"  [Section C] wall time = {_t_sC:.3f} s   RSS now = {_rss_sC:.1f} MB  (Δ {_rss_sC - _rss_sC_start:+.1f} MB)")
 print()
 
 # ---------------------------------------------------------------------------
 # 5d.  pyJoules — hardware energy measurement (RAPL) with software fallback
 # ---------------------------------------------------------------------------
+_t_sD_start  = _time_mod.perf_counter()
+_rss_sD_start = _rss_mb()
+
 print("=" * 72)
 print("  SECTION D — pyJoules ENERGY MEASUREMENT  (RAPL / CPU perf counters)")
 print("=" * 72)
@@ -616,6 +659,9 @@ except Exception as e:
         elapsed = time.perf_counter() - t0
         print(f"  {tag:<28}  {elapsed:>14.4f}  {elapsed/n_calls*1e6:>9.2f} µs")
 
+_t_sD   = _time_mod.perf_counter() - _t_sD_start
+_rss_sD = _rss_mb()
+print(f"\n  [Section D] wall time = {_t_sD:.3f} s   RSS now = {_rss_sD:.1f} MB  (Δ {_rss_sD - _rss_sD_start:+.1f} MB)")
 print()
 
 # ---------------------------------------------------------------------------
@@ -641,9 +687,6 @@ for name, us in ranked:
     if "aruco" in name and us > 1000:
         hints.append(f"• {name}: {us:.0f} µs — consider reducing DETECT_EVERY_N "
                      f"or skip CLAHE when ambient light is stable.")
-    if "correct_frame" in name and us > 500:
-        hints.append(f"• {name}: {us:.0f} µs — LUT already fast; "
-                     f"pre-split BGR channels once at capture time.")
     if "spec" in name and us > 100:
         hints.append(f"• {name}: {us:.0f} µs — dict key lookups dominate; "
                      f"convert calibration means to np.ndarray at load time.")
@@ -655,6 +698,31 @@ for h in hints or ["  No obvious hotspots above thresholds."]:
     print(f"  {h}")
 
 print()
+
+# ---------------------------------------------------------------------------
+# 7.  Section E — Memory & Execution Time Summary
+# ---------------------------------------------------------------------------
+_t_total = _time_mod.perf_counter() - _t_script_start
+_rss_end  = _rss_mb()
+
+print("=" * 72)
+print("  SECTION E — MEMORY & EXECUTION TIME SUMMARY")
+print("=" * 72)
+print(f"  {'Metric':<35}  {'Value':>15}")
+print("  " + "-" * 54)
+print(f"  {'Total script wall time':<35}  {_t_total:>14.3f} s")
+print(f"  {'RSS at baseline':<35}  {_rss_baseline:>13.1f} MB")
+print(f"  {'RSS at end':<35}  {_rss_end:>13.1f} MB")
+print(f"  {'RSS net delta':<35}  {_rss_end - _rss_baseline:>+13.1f} MB")
+print()
+print(f"  {'Section':<35}  {'Wall time (s)':>13}  {'RSS end (MB)':>12}  {'ΔRSS (MB)':>10}")
+print("  " + "-" * 74)
+print(f"  {'A  timeit microbenchmarks':<35}  {_t_sA:>13.3f}  {_rss_sA:>12.1f}  {_rss_sA - _rss_sA_start:>+9.1f}")
+print(f"  {'B  cProfile call graph':<35}  {_t_sB:>13.3f}  {_rss_sB:>12.1f}  {_rss_sB - _rss_sB_start:>+9.1f}")
+print(f"  {'C  CodeCarbon emissions':<35}  {_t_sC:>13.3f}  {_rss_sC:>12.1f}  {_rss_sC - _rss_sC_start:>+9.1f}")
+print(f"  {'D  pyJoules / sw-timer energy':<35}  {_t_sD:>13.3f}  {_rss_sD:>12.1f}  {_rss_sD - _rss_sD_start:>+9.1f}")
+print()
+
 print("[HARNESS] Done.")
 print(f"          cProfile binary  : {_prof_path}")
 print(f"          Snakeviz viewer  : snakeviz {_prof_path}")

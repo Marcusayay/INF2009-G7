@@ -48,6 +48,17 @@ except ImportError:
     track_temp  = lambda: 0.0
     track_power = lambda: 0.0
 
+# --- Inline Profiling Helpers ---
+try:
+    import psutil as _psutil
+    _SELF_PROC = _psutil.Process()
+    def _rss_mb() -> float:
+        return _SELF_PROC.memory_info().rss / 1024 ** 2
+except ImportError:
+    import resource as _resource
+    def _rss_mb() -> float:
+        return _resource.getrusage(_resource.RUSAGE_SELF).ru_maxrss / 1024
+
 
 # =============================================================================
 # 0. ENUMS
@@ -1420,6 +1431,21 @@ def main_pipeline():
 
                 print("\n[PIPELINE] Launching parallel detection paths...")
                 t_start = time.time()
+
+                # ---- Profiler START ----
+                _prof_wall_start = time.perf_counter()
+                _prof_cpu_start  = time.process_time()
+                _prof_rss_start  = _rss_mb()
+                _rss_poll_samples = []
+                _rss_poll_stop    = threading.Event()
+                def _rss_poller():
+                    while not _rss_poll_stop.is_set():
+                        _rss_poll_samples.append(_rss_mb())
+                        time.sleep(0.05)
+                _rss_poll_thread = threading.Thread(target=_rss_poller, daemon=True)
+                _rss_poll_thread.start()
+                # ---- Profiler START END ----
+
                 try:
                     with concurrent.futures.ThreadPoolExecutor(max_workers=2) as ex:
                         fv = ex.submit(path_1_vision_model)
@@ -1437,6 +1463,12 @@ def main_pipeline():
                     mqtt_publish_result(Material.GENERAL_WASTE, "general", "others", weight)
                     _set_target(float(MATERIAL_TO_COMPARTMENT[Material.GENERAL_WASTE].value))
                     continue
+
+                # ---- Stop RSS poller ----
+                _rss_poll_stop.set()
+                _rss_poll_thread.join(timeout=0.2)
+                _prof_rss_peak_paths = max(_rss_poll_samples) if _rss_poll_samples else _rss_mb()
+                # ---- Stop RSS poller END ----
 
                 t_elapsed = time.time() - t_start
                 print(f"[PIPELINE] Both paths complete in {t_elapsed:.2f} s")
@@ -1458,7 +1490,22 @@ def main_pipeline():
                     final_decision  = Material.GENERAL_WASTE
                     mqtt_mat_str    = "general"
                     mqtt_shape_str  = "others"
- 
+
+                # ---- Profiler STOP ----
+                _prof_wall_ms  = (time.perf_counter() - _prof_wall_start) * 1000
+                _prof_cpu_ms   = (time.process_time()  - _prof_cpu_start)  * 1000
+                _prof_rss_end  = _rss_mb()
+                print(f"\n{'='*54}")
+                print(f"[PROFILER]  DETECTION PIPELINE (trigger → decision)")
+                print(f"[PROFILER]    Wall clock       : {_prof_wall_ms:.1f} ms")
+                print(f"[PROFILER]    CPU time         : {_prof_cpu_ms:.1f} ms")
+                print(f"[PROFILER]    RSS start        : {_prof_rss_start:.1f} MB")
+                print(f"[PROFILER]    RSS peak (paths) : {_prof_rss_peak_paths:.1f} MB")
+                print(f"[PROFILER]    RSS end          : {_prof_rss_end:.1f} MB")
+                print(f"[PROFILER]    RSS delta        : {_prof_rss_end - _prof_rss_start:.1f} MB")
+                print(f"{'='*54}\n")
+                # ---- Profiler STOP END ----
+
                 compartment = MATERIAL_TO_COMPARTMENT.get(
                     final_decision, MATERIAL_TO_COMPARTMENT[Material.GENERAL_WASTE]
                 )

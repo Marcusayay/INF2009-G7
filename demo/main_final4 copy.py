@@ -120,7 +120,7 @@ def correct_frame(frame):
 hx = HX711(dout_pin=15, pd_sck_pin=14)
 RATIO  = 120.20
 OFFSET = 0
-WEIGHT_TRIGGER_THRESHOLD = 5.0
+WEIGHT_TRIGGER_THRESHOLD = 2.0
 
 METAL_CONTAMINATION_WEIGHT_LIMIT = 40.0
 PLASTIC_GLASS_WEIGHT_THRESHOLD = 25.0
@@ -244,7 +244,7 @@ VISION_QUANTIZED               = True
 VISION_BUFFER_THRESHOLD = 10
 VISION_FREQ_THRESHOLD   = 7
 VISION_CONF_THRESHOLD   = 0.89
-VISION_TIMEOUT_S        = 10.0
+VISION_TIMEOUT_S        = 2.0
 
 print("[VISION] Loading MobileNet model...")
 latest_model_path, _ = return_latest_version_path("mobilenet")
@@ -906,8 +906,19 @@ def servo_tracking_daemon():
         cv2.putText(vis_disp, "Vision Cam", (5, 20),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
         combined = np.hstack([track_disp, vis_disp])
+
+        # Overlay manual-reset hint
+        cv2.putText(combined, "Press R: reset servo", (5, combined.shape[0] - 8),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 200, 255), 1)
         cv2.imshow("Camera Preview", combined)
-        cv2.waitKey(1)
+
+        _key = cv2.waitKey(1) & 0xFF
+        if _key == ord('r') and target_angle_20 is not None:
+            print("[DAEMON] ⚠ Manual servo reset — stopping motor and clearing target")
+            set_speed_20(SPEED_STOP)
+            target_angle_20 = None
+            is_homing       = False
+            _tracking_pause.clear()   # unblock daemon so it resumes idle tracking
 
         # --- Frame-skip detection (mirrors servo_Controller.py) --------------
         _daemon_frame_ctr += 1

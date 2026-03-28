@@ -8,8 +8,20 @@ import numpy as np
 import RPi.GPIO as GPIO
 import concurrent.futures
 import threading
+import tracemalloc
 from enum import Enum
 from collections import Counter
+
+try:
+    
+    import psutil as _psutil
+    _SELF_PROC = _psutil.Process()
+    def _rss_mb() -> float:
+        return _SELF_PROC.memory_info().rss / 1024 ** 2
+except ImportError:
+    import resource as _resource
+    def _rss_mb() -> float:
+        return _resource.getrusage(_resource.RUSAGE_SELF).ru_maxrss / 1024
 
 import paho.mqtt.client as mqtt
 
@@ -1527,18 +1539,77 @@ def main_pipeline():
 
                 print("\n[PIPELINE] Launching parallel detection paths...")
                 _tracking_pause.set()
+
+                # ── PROFILER START ────────────────────────────────────────
+                _prof_wall_start = time.perf_counter()
+                _prof_cpu_start  = time.process_time()
+                _prof_rss_start  = _rss_mb()
+                # RSS poller — samples every 50 ms, no thread interference
+                _rss_poll_samples = []
+                _rss_poll_stop    = threading.Event()
+                def _rss_poller():
+                    while not _rss_poll_stop.is_set():
+                        _rss_poll_samples.append(_rss_mb())
+                        time.sleep(0.05)
+                _rss_poll_thread = threading.Thread(target=_rss_poller, daemon=True)
+                _rss_poll_thread.start()
+                # Per-path wrappers — wall clock, CPU time, RSS delta, peak alloc.
+                # tracemalloc runs ONLY inside _path1_wrapped (pure compute, no I2C).
+                # _path2_wrapped never touches tracemalloc — it uses I2C hardware with
+                # tight timing that tracemalloc overhead breaks.
+                # CPU time is process-wide so per-path values are approximate.
+                _path_mem = {}
+                def _path1_wrapped():
+                    _wall  = time.perf_counter()
+                    _cpu   = time.process_time()
+                    _rss_b = _rss_mb()
+                    tracemalloc.start()
+                    result = path_1_vision_model()
+                    _, _peak = tracemalloc.get_traced_memory()
+                    tracemalloc.stop()
+                    _path_mem['p1_wall_ms']   = (time.perf_counter() - _wall) * 1000
+                    _path_mem['p1_cpu_ms']    = (time.process_time() - _cpu)  * 1000
+                    _path_mem['p1_rss_delta'] = _rss_mb() - _rss_b
+                    _path_mem['p1_peak_kb']   = _peak / 1024
+                    return result
+                def _path2_wrapped():
+                    _wall    = time.perf_counter()
+                    _cpu     = time.process_time()
+                    _rss_b   = _rss_mb()
+                    _rss_kb0 = _SELF_PROC.memory_info().rss / 1024
+                    result   = path_2_material_detection()
+                    _rss_kb1 = _SELF_PROC.memory_info().rss / 1024
+                    _path_mem['p2_wall_ms']   = (time.perf_counter() - _wall) * 1000
+                    _path_mem['p2_cpu_ms']    = (time.process_time() - _cpu)  * 1000
+                    _path_mem['p2_rss_delta'] = _rss_mb() - _rss_b
+                    _path_mem['p2_peak_kb']   = max(0.0, _rss_kb1 - _rss_kb0)  # RSS delta in KB (no tracemalloc — I2C timing)
+                    return result
+                # ─────────────────────────────────────────────────────────
+
+                PATH2_TIMEOUT = 20.0   # seconds before PATH 2 is considered hung
+
                 t_start = time.time()
                 try:
                     with concurrent.futures.ThreadPoolExecutor(max_workers=2) as ex:
-                        fv = ex.submit(path_1_vision_model)
-                        fm = ex.submit(path_2_material_detection)
+                        fv = ex.submit(_path1_wrapped)
+                        fm = ex.submit(_path2_wrapped)
                         vision_result              = fv.result()
-                        material_result, spec_conf = fm.result()
+                        try:
+                            material_result, spec_conf = fm.result(timeout=PATH2_TIMEOUT)
+                        except concurrent.futures.TimeoutError:
+                            print(f"[PIPELINE] ✗ PATH 2 timed out after {PATH2_TIMEOUT:.0f} s "
+                                  f"— defaulting to PLASTIC  conf=0")
+                            material_result = Material.PLASTIC
+                            spec_conf       = 0.0
                 except Exception as e:
                     print(f"[PIPELINE] ✗ Detection path failed: {e} — defaulting to GENERAL_WASTE/others")
+                    _rss_poll_stop.set()
                     _tracking_pause.clear()
                     _set_target(float(MATERIAL_TO_COMPARTMENT[Material.GENERAL_WASTE].value))
                     continue
+
+                _rss_poll_stop.set()
+                _prof_rss_peak_paths = max(_rss_poll_samples) if _rss_poll_samples else _rss_mb()
 
                 # Read weight after detection — scale has been settling during
                 # the entire detection duration, no extra sleep needed,
@@ -1566,6 +1637,7 @@ def main_pipeline():
                       f"conf={spec_conf:.1f}%")
                 print(f"  Weight            : {weight:.1f} g")
  
+                tracemalloc.start()
                 try:
                     final_decision, mqtt_mat_str, mqtt_shape_str = fuse_results(
                         vision_result, material_result, spec_conf, weight
@@ -1575,13 +1647,57 @@ def main_pipeline():
                     final_decision  = Material.GENERAL_WASTE
                     mqtt_mat_str    = "general"
                     mqtt_shape_str  = "others"
- 
+                _, _prof_peak = tracemalloc.get_traced_memory()
+                tracemalloc.stop()
+
+                # ── PROFILER STOP (decision made, before actuation) ───────
+                _prof_wall_s  = time.perf_counter() - _prof_wall_start
+                _prof_cpu_s   = time.process_time()  - _prof_cpu_start
+                _prof_rss_end = _rss_mb()
+                _nan = float('nan')
+                # psutil system stats
+                _vm           = _psutil.virtual_memory()
+                _active_ram   = _vm.active  / 1024**2   # MB
+                _used_ram_pct = _vm.percent
+                _temps        = _psutil.sensors_temperatures() if hasattr(_psutil, 'sensors_temperatures') else {}
+                _cpu_temp     = (_temps['cpu_thermal'][0].current
+                                 if 'cpu_thermal' in _temps and _temps['cpu_thermal']
+                                 else float('nan'))
+                print(
+                    f"\n[PROFILER] {'─'*50}\n"
+                    f"[PROFILER]  SYSTEM\n"
+                    f"[PROFILER]    CPU temp             : {_cpu_temp:.1f} °C\n"
+                    f"[PROFILER]    RAM used             : {_used_ram_pct:.1f}%\n"
+                    f"[PROFILER]    Active RAM           : {_active_ram:.1f} MB\n"
+                    f"[PROFILER]  OVERALL\n"
+                    f"[PROFILER]    Wall clock           : {_prof_wall_s*1000:.1f} ms\n"
+                    f"[PROFILER]    CPU time             : {_prof_cpu_s*1000:.1f} ms\n"
+                    f"[PROFILER]    RSS start            : {_prof_rss_start:.1f} MB\n"
+                    f"[PROFILER]    RSS peak (paths)     : {_prof_rss_peak_paths:.1f} MB\n"
+                    f"[PROFILER]    RSS end              : {_prof_rss_end:.1f} MB\n"
+                    f"[PROFILER]    RSS delta            : {_prof_rss_end - _prof_rss_start:+.1f} MB\n"
+                    f"[PROFILER]  PATH 1 (vision)\n"
+                    f"[PROFILER]    Wall clock           : {_path_mem.get('p1_wall_ms', _nan):.1f} ms\n"
+                    f"[PROFILER]    CPU time (approx)    : {_path_mem.get('p1_cpu_ms',  _nan):.1f} ms\n"
+                    f"[PROFILER]    RSS delta            : {_path_mem.get('p1_rss_delta',_nan):+.1f} MB\n"
+                    f"[PROFILER]    Peak alloc           : {_path_mem.get('p1_peak_kb',  _nan):.1f} KB\n"
+                    f"[PROFILER]  PATH 2 (material)\n"
+                    f"[PROFILER]    Wall clock           : {_path_mem.get('p2_wall_ms', _nan):.1f} ms\n"
+                    f"[PROFILER]    CPU time (approx)    : {_path_mem.get('p2_cpu_ms',  _nan):.1f} ms\n"
+                    f"[PROFILER]    RSS delta            : {_path_mem.get('p2_rss_delta',_nan):+.1f} MB\n"
+                    f"[PROFILER]    Peak alloc (RSS)     : {_path_mem.get('p2_peak_kb',  _nan):.1f} KB\n"
+                    f"[PROFILER]  FUSION\n"
+                    f"[PROFILER]    Peak alloc           : {_prof_peak/1024:.1f} KB\n"
+                    f"[PROFILER] {'─'*50}"
+                )
+                # ─────────────────────────────────────────────────────────
+
                 compartment = MATERIAL_TO_COMPARTMENT.get(
                     final_decision, MATERIAL_TO_COMPARTMENT[Material.GENERAL_WASTE]
                 )
                 target_deg = compartment if isinstance(compartment, float) \
                              else float(compartment.value)
- 
+
                 print(f"\n[PIPELINE] ══════════════════════════════")
                 print(f"[PIPELINE]  FINAL DECISION : {final_decision.value}")
                 print(f"[PIPELINE]  MQTT PAYLOAD   : material={mqtt_mat_str}  "
