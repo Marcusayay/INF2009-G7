@@ -1,15 +1,10 @@
 # INF2009-G7 — Edge AI Waste Classification System
-
-> **Demo Session Notice:** Poster, Video, and Peer Evaluation are due **Monday, 30th March, 0900 hrs**.
-> The demo is a live showcase of the system's functionality — not a video presentation.
-> Please include the GitHub repo link in the poster. All work, experiments, and iterations must be documented in the repo as this directly influences grading.
-
 ---
 
 ## Table of Contents
 
 1. [Project Overview](#project-overview)
-2. [System Architecture](#system-architecture)
+2. [Vision Pipeline](#vision-pipeline)
 3. [ML Pipeline — Detailed](#ml-pipeline--detailed)
    - [Dataset Acquisition](#1-dataset-acquisition)
    - [Dataset Preparation for MobileNet](#2-dataset-preparation-for-mobilenet)
@@ -19,6 +14,7 @@
    - [YOLO Object Detection Training](#6-yolo-object-detection-training)
    - [YOLO Export & Format Benchmarking](#7-yolo-export--format-benchmarking)
    - [Accuracy Benchmarking Across Formats](#8-accuracy-benchmarking-across-formats)
+   - [Runtime Benchmarking (Edge Performance)](#8b-runtime-benchmarking-edge-performance) 
 4. [Inference Pipeline (Edge Deployment)](#inference-pipeline-edge-deployment)
    - [Model Loading & Runtime](#model-loading--runtime)
    - [run_mob.py — Full Benchmark Run](#run_mobpy--full-benchmark-run)
@@ -33,16 +29,25 @@
 
 ## Project Overview
 
-This project builds an **edge AI waste classification system** designed to run on a **Raspberry Pi 5**. Two ML approaches are implemented and benchmarked:
+This project implements a **real-time edge AI waste classification system** on a **Raspberry Pi 5**, integrating computer vision, multiple sensors, and actuator control into a single pipeline.
 
-- **MobileNetV2** — a lightweight image classification model (crops → classify), optimised for low-power inference via INT8 quantization into TFLite.
-- **YOLOv8/v26** — a full object detection model, exported to NCNN (FP16 & FP32) and TFLite (INT8) for comparative benchmarking.
+The system captures live video of incoming waste, performs classification using an onboard ML model, and combines this with additional sensor inputs (inductive sensor, spectrometer, weight sensor, and break beam) to make a final material decision. Based on this decision, a servo-driven mechanism routes the object to the correct compartment.
 
-The system captures live video, crops the centre region of interest, runs inference, and uses a **temporal buffer** to confirm detections before triggering a save/alert — minimising false positives under noisy real-world conditions.
+Two ML approaches were explored and benchmarked as part of the system design:
 
+* **MobileNetV2** — a lightweight image classification model (crop → classify), optimised for low-power inference using INT8 quantization (TFLite)
+* **YOLOv8/v26** — an object detection model evaluated across multiple deployment formats (NCNN FP16/FP32 and TFLite INT8)
+
+To improve robustness in real-world conditions, the system uses a **temporal buffering mechanism** to stabilise predictions before triggering actuation, reducing false positives caused by noise, motion blur, or inconsistent lighting.
+
+The final system is designed with a focus on:
+
+* **Low-latency inference on edge hardware**
+* **Robust classification under real-world constraints (UV lighting, noise, occlusion)**
+* **Sensor fusion for improved reliability beyond vision-only approaches**
 ---
 
-## System Architecture
+## Vision Pipeline
 
 ```
 Camera Feed (640x480)
@@ -328,6 +333,49 @@ Models benchmarked:
 - `best_full_integer_quant.tflite` (TFLite Full INT8)
 
 Results were aggregated into a `defaultdict` and printed in tabular form for direct comparison.
+
+---
+
+### 8b. Runtime Benchmarking (Edge Performance)
+
+**Script:** `benchmark.py`
+
+In addition to accuracy benchmarking, runtime performance of each YOLO model was evaluated directly on the Raspberry Pi using a live webcam feed to reflect real deployment conditions.
+
+Each model in the `./models` directory was tested for a fixed duration of 30 seconds. The first 20 frames were treated as warm-up and excluded from measurements to avoid initialization overhead.
+
+For each frame:
+
+* **System latency** was measured using `time.perf_counter()` around the full `model(frame, ...)` call
+* **Model preprocess, inference, and postprocess times** were obtained from `pred[0].speed`
+* **RAM usage** was recorded via `psutil.virtual_memory().percent`
+* **CPU temperature** was recorded via `psutil.sensors_temperatures()`
+
+#### Configuration
+
+* Resolution: 640×480
+* Confidence threshold: 0.4
+* IoU threshold: 0.5
+* Camera buffer size: 1 (to reduce latency)
+* Video display disabled to avoid rendering overhead
+
+#### Metrics Computed
+
+* Mean system FPS
+* Mean / median / min / max system latency
+* Mean preprocess, inference, and postprocess times
+* Estimated Python overhead:
+
+```
+python_overhead = system_latency - (preprocess + inference + postprocess)
+```
+
+* Peak RAM usage
+* Peak CPU temperature
+
+Results were aggregated into a Pandas DataFrame and exported as `benchmark_results.csv` for comparison across model formats.
+
+This runtime benchmark was critical in selecting the final model, as it reflects true end-to-end latency rather than raw model inference speed alone.
 
 ---
 
