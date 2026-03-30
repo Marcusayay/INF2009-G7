@@ -56,7 +56,7 @@ IMAGE_OUTPUT_DIR = os.path.join(IMAGE_OUTPUT_DIR, f"run_{runNumber}")
 # ---------------- Load Model ----------------
 # get latest version 
 
-latest_model_path = return_latest_version_path("mobilenet")
+latest_model_path, _ = return_latest_version_path("mobilenet")
 model, input_details, output_details, model_path = load_model(quantized=QUANTIZED, model_path=latest_model_path)
 
 # from latest_model_path, read the labels.txt to get the class names (if it exists)
@@ -78,7 +78,7 @@ def safe_mean(x, default=0.0): return statistics.mean(x) if x else default
 def safe_median(x, default=0.0): return statistics.median(x) if x else default
 
 # ---------------- Main Loop ----------------
-cap = cv2.VideoCapture(0)
+cap = cv2.VideoCapture("/dev/video_vision")
 cap.set(cv2.CAP_PROP_FRAME_WIDTH, FRAME_W)
 cap.set(cv2.CAP_PROP_FRAME_HEIGHT, FRAME_H)
 cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)

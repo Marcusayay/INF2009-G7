@@ -18,12 +18,17 @@ import paho.mqtt.client as mqtt
 os.chdir(os.path.dirname(os.path.abspath(__file__)))
 
 import subprocess
-subprocess.run(["v4l2-ctl", "--set-ctrl=auto_exposure=1"],               check=False)
-subprocess.run(["v4l2-ctl", "--set-ctrl=exposure_time_absolute=25"],      check=False)
-subprocess.run(["v4l2-ctl", "--set-ctrl=brightness=255"],                 check=False)
-subprocess.run(["v4l2-ctl", "--set-ctrl=gain=200"],                       check=False)
-subprocess.run(["v4l2-ctl", "--set-ctrl=white_balance_automatic=0"],      check=False)
-subprocess.run(["v4l2-ctl", "--set-ctrl=white_balance_temperature=6500"], check=False)
+
+subprocess.run(["v4l2-ctl", "-d", "/dev/video2", "--set-ctrl=auto_exposure=3"],          check=False)
+subprocess.run(["v4l2-ctl", "-d", "/dev/video2", "--set-ctrl=brightness=128"],            check=False)
+subprocess.run(["v4l2-ctl", "-d", "/dev/video2", "--set-ctrl=gain=0"],                   check=False)
+subprocess.run(["v4l2-ctl", "-d", "/dev/video2", "--set-ctrl=white_balance_automatic=1"], check=False)
+subprocess.run(["v4l2-ctl", "-d", "/dev/video0", "--set-ctrl=auto_exposure=1"],               check=False)
+subprocess.run(["v4l2-ctl", "-d", "/dev/video0", "--set-ctrl=exposure_time_absolute=25"],      check=False)
+subprocess.run(["v4l2-ctl", "-d", "/dev/video0", "--set-ctrl=brightness=255"],                 check=False)
+subprocess.run(["v4l2-ctl", "-d", "/dev/video0", "--set-ctrl=gain=200"],                       check=False)
+subprocess.run(["v4l2-ctl", "-d", "/dev/video0", "--set-ctrl=white_balance_automatic=0"],      check=False)
+subprocess.run(["v4l2-ctl", "-d", "/dev/video0", "--set-ctrl=white_balance_temperature=6500"], check=False)
 
 # =============================================================================
 # NOTE: setMouseCallback is NOT used anywhere in this file.
@@ -48,17 +53,6 @@ except ImportError:
     track_temp  = lambda: 0.0
     track_power = lambda: 0.0
 
-# --- Inline Profiling Helpers ---
-try:
-    import psutil as _psutil
-    _SELF_PROC = _psutil.Process()
-    def _rss_mb() -> float:
-        return _SELF_PROC.memory_info().rss / 1024 ** 2
-except ImportError:
-    import resource as _resource
-    def _rss_mb() -> float:
-        return _resource.getrusage(_resource.RUSAGE_SELF).ru_maxrss / 1024
-
 
 # =============================================================================
 # 0. ENUMS
@@ -72,8 +66,8 @@ class Material(Enum):
 
 class Compartment(Enum):
     METAL         = 220
-    GLASS         = 290
-    PLASTIC       = 65
+    GLASS         = 65
+    PLASTIC       = 320
     GENERAL_WASTE = 120
 
 MATERIAL_TO_COMPARTMENT: dict[Material, Compartment] = {
@@ -91,6 +85,8 @@ MATERIAL_TO_COMPARTMENT: dict[Material, Compartment] = {
 _CORRECTION_LUT_B = None
 _CORRECTION_LUT_G = None
 _CORRECTION_LUT_R = None
+
+_hx711_lock = threading.Lock()
 
 
 def correct_frame(frame):
@@ -114,12 +110,12 @@ def correct_frame(frame):
 
 # -- Weight Sensor (HX711) --
 hx = HX711(dout_pin=15, pd_sck_pin=14)
-RATIO  = 492.22
+RATIO  = 120.20
 OFFSET = 0
-WEIGHT_TRIGGER_THRESHOLD = 5.0
+WEIGHT_TRIGGER_THRESHOLD = 3.0
 
-METAL_CONTAMINATION_WEIGHT_LIMIT = 500.0
-PLASTIC_GLASS_WEIGHT_THRESHOLD = 100.0
+METAL_CONTAMINATION_WEIGHT_LIMIT = 40.0
+PLASTIC_GLASS_WEIGHT_THRESHOLD = 25.0
 
 
 # -- Inductive Sensor (SN04-N) --
@@ -136,7 +132,7 @@ beam_sensor = Button(PIN_BEAM, pull_up=True)
 SPEC_GAIN                     = 2048
 SPEC_INTEGRATION_TIME         = 200
 SPEC_CALIBRATION_SAMPLES      = 12
-SPEC_SCAN_SAMPLES             = 6
+SPEC_SCAN_SAMPLES             = 2
 SPEC_LOW_CONFIDENCE_THRESHOLD = 15
 SPEC_CALIB_FILE               = "calibration.json"
 SPEC_EXCLUDE_CHANNELS         = {'flicker', 'clear'}
@@ -192,8 +188,9 @@ is_homing          = False
 HOME_ANGLE         = 85
 calibration_mode   = False
 
-_latest_frame = None
-_frame_lock   = threading.Lock()
+_latest_frame   = None
+_frame_lock     = threading.Lock()
+_tracking_pause = threading.Event()   # set = daemon paused, clear = running
 
 center_x, center_y = 169, 113
 
@@ -210,8 +207,8 @@ cap_tracking = cv2.VideoCapture(0)
 cap_tracking.set(cv2.CAP_PROP_FRAME_WIDTH,  320)
 cap_tracking.set(cv2.CAP_PROP_FRAME_HEIGHT, 240)
 cap_tracking.set(cv2.CAP_PROP_BUFFERSIZE,   1)
-cap_tracking.set(cv2.CAP_PROP_AUTO_EXPOSURE, 1)
-cap_tracking.set(cv2.CAP_PROP_EXPOSURE,     -5)
+# cap_tracking.set(cv2.CAP_PROP_AUTO_EXPOSURE, 1)
+# cap_tracking.set(cv2.CAP_PROP_EXPOSURE,     -5)
 if not cap_tracking.isOpened():
     print("[ERROR] Cannot open tracking camera (index 0). Check /dev/video0.")
     sys.exit(1)
@@ -239,11 +236,11 @@ VISION_QUANTIZED               = True
 
 VISION_BUFFER_THRESHOLD = 10
 VISION_FREQ_THRESHOLD   = 7
-VISION_CONF_THRESHOLD   = 0.89
+VISION_CONF_THRESHOLD   = 0.70
 VISION_TIMEOUT_S        = 1.0
 
 print("[VISION] Loading MobileNet model...")
-latest_model_path = return_latest_version_path("mobilenet")
+latest_model_path, _ = return_latest_version_path("mobilenet")
 vision_model, vision_input_details, vision_output_details, _vision_model_path = load_model(
     quantized=VISION_QUANTIZED,
     model_path=latest_model_path,
@@ -263,7 +260,7 @@ else:
 # 1d. MQTT — publishes one message per classification cycle
 # =============================================================================
 
-MQTT_BROKER = "10.127.71.107"
+MQTT_BROKER = "10.254.93.107"
 MQTT_PORT   = 1883
 MQTT_TOPIC  = "pi/raw_transaction"
 
@@ -470,12 +467,12 @@ def _iqr_clean(vals: list) -> list:
     lo, hi = q1 - 1.5 * iqr, q3 + 1.5 * iqr
     clean = [v for v in s if lo <= v <= hi]
     return clean if clean else s
-
 def tare_scale():
     global OFFSET
     print("[SCALE]  Taring — ensure platform is empty...")
     time.sleep(1)
-    vals = hx.get_raw_data(20)
+    with _hx711_lock:
+        vals = hx.get_raw_data(20)
     if vals:
         clean   = _iqr_clean(vals)
         OFFSET  = int(sum(clean) / len(clean))
@@ -484,13 +481,58 @@ def tare_scale():
               f"dropped={dropped}/{len(vals)}  RATIO={RATIO}")
     else:
         print("[SCALE]  Tare FAILED — no data from HX711")
+_cached_weight      = 0.0
+_cached_weight_lock = threading.Lock()
+
+def _weight_daemon():
+    """Continuously samples HX711 with small batches for fast trigger detection."""
+    global _cached_weight
+    while True:
+        with _hx711_lock:
+            vals = hx.get_raw_data(3)
+        if vals:
+            clean = _iqr_clean(vals)
+            w = (sum(clean) / len(clean) - OFFSET) / RATIO
+            with _cached_weight_lock:
+                _cached_weight = w
+
+def get_cached_weight() -> float:
+    with _cached_weight_lock:
+        return _cached_weight
 
 def get_weight() -> float:
-    vals = hx.get_raw_data(20)
-    if not vals:
-        return 0.0
-    clean = _iqr_clean(vals)
-    return (sum(clean) / len(clean) - OFFSET) / RATIO
+    """
+    Waits for readings to stabilise before returning.
+    Collects samples one-by-one into a sliding window; returns when
+    the window variance drops below STABLE_THRESHOLD or timeout is hit.
+    """
+    WINDOW       = 6      # number of consecutive samples to check
+    STABLE_G     = 3.0    # max spread (g) to be considered stable
+    TIMEOUT_S    = 6.0    # give up and return best guess after this long
+    window       = []
+    t_start      = time.time()
+
+    while True:
+        with _hx711_lock:
+            vals = hx.get_raw_data(2)
+        if vals:
+            w = (sum(vals) / len(vals) - OFFSET) / RATIO
+            window.append(w)
+            if len(window) > WINDOW:
+                window.pop(0)
+            if len(window) == WINDOW and (max(window) - min(window)) < STABLE_G:
+                result = sum(window) / len(window)
+                print(f"[SCALE]  Stable at {result:.1f} g  "
+                      f"(spread={max(window)-min(window):.1f} g  "
+                      f"t={time.time()-t_start:.1f} s)")
+                return result
+
+        if time.time() - t_start > TIMEOUT_S:
+            result = sum(window) / len(window) if window else 0.0
+            print(f"[SCALE]  Timeout — returning {result:.1f} g")
+            return result
+
+
 
 
 # =============================================================================
@@ -855,6 +897,10 @@ def servo_tracking_daemon():
     _last_tape_state = None
 
     while True:
+        if _tracking_pause.is_set():
+            time.sleep(0.05)
+            continue
+
         ret, frame = cap_tracking.read()
         if not ret:
             time.sleep(0.01)
@@ -862,6 +908,9 @@ def servo_tracking_daemon():
 
         with _frame_lock:
             _latest_frame = frame.copy()
+        
+        cv2.imshow("Tracking Camera", frame)
+        cv2.waitKey(1)
 
         # --- Frame-skip detection (mirrors servo_Controller.py) --------------
         _daemon_frame_ctr += 1
@@ -886,10 +935,11 @@ def servo_tracking_daemon():
 
         # --- Watchdog --------------------------------------------------------
         if not marker_found:
+            if target_angle_20 is not None:
+                set_speed_20(SPEED_STOP)
             elapsed = time.time() - last_marker_seen
             if elapsed > TRACKING_TIMEOUT and target_angle_20 is not None:
-                print(f"[DAEMON] Marker lost {elapsed:.1f} s — stopping motor")
-                set_speed_20(SPEED_STOP)
+                print(f"[DAEMON] Marker lost {elapsed:.1f} s — paused, awaiting reacquisition")
 
         # --- Motor control ---------------------------------------------------
         if target_angle_20 is not None and marker_found:
@@ -911,22 +961,40 @@ def servo_tracking_daemon():
                 elif not is_homing:
                     print(f"\n[DAEMON] TARGET REACHED at {current_angle_20:.1f}°  "
                           f"(target={target_angle_20:.1f}°  dist={dist:.1f}°)")
+                    # NEW — waits for marker to reappear before starting homing
                     print("[ARM]    Tilting up...")
                     set_angle_instant_21(100)
                     time.sleep(1.0)
                     print("[ARM]    Tilting down...")
                     set_angle_instant_21(0)
-                    time.sleep(1.0)
-                    print(f"[DAEMON] Starting HOME sequence → {HOME_ANGLE}°")
+
                     came_from_general_waste = (
                         abs(current_angle_20 - float(Compartment.GENERAL_WASTE.value))
                         <= ANGLE_TOLERANCE
                     )
                     outbound_direction = SPEED_FWD if came_from_general_waste else SPEED_BWD
-                    target_angle_20    = HOME_ANGLE
-                    is_homing          = True
-                    for _ in range(10):
-                        cap_tracking.read()
+
+                    print("[DAEMON] Tilt complete — waiting for marker to reappear before homing...")
+                    _marker_wait_start = time.time()
+                    while True:
+                        ret, _wf = cap_tracking.read()
+                        if not ret:
+                            time.sleep(0.01)
+                            continue
+                        _recheck_angle, _ = detect_aruco_angle(_wf)
+                        if _recheck_angle is not None:
+                            current_angle_20 = _recheck_angle
+                            last_marker_seen = time.time()
+                            print(f"[DAEMON] Marker reacquired at {current_angle_20:.1f}°  "
+                                f"(waited {time.time() - _marker_wait_start:.2f} s) — starting HOME")
+                            break
+                        if time.time() - _marker_wait_start > 5.0:
+                            print("[DAEMON] Marker not reacquired after 5 s — starting HOME anyway")
+                            break
+                        time.sleep(0.01)
+
+                    target_angle_20 = HOME_ANGLE
+                    is_homing       = True
                 else:
                     print(f"[DAEMON] HOME REACHED at {current_angle_20:.1f}°  "
                           f"(target={HOME_ANGLE}°  dist={dist:.1f}°)  System idle.")
@@ -999,7 +1067,38 @@ def calibrate_center_point():
     cv2.destroyWindow(WIN)
     cv2.waitKey(1)
 
+def calibrate_weight_thresholds():
+    global WEIGHT_TRIGGER_THRESHOLD, PLASTIC_GLASS_WEIGHT_THRESHOLD
 
+    print("\n" + "=" * 60)
+    print("  WEIGHT THRESHOLD CALIBRATION")
+    print("=" * 60)
+
+    # --- Plastic bottle → trigger threshold ----------------------------------
+    input("\n  Place your EMPTY PLASTIC BOTTLE on the scale, then press Enter...")
+    print("  Measuring plastic bottle weight...")
+    time.sleep(0.5)
+    with _hx711_lock:
+        plastic_w = get_weight()
+    # Trigger threshold = half the plastic bottle weight, minimum 2g
+    WEIGHT_TRIGGER_THRESHOLD = max(2.0, round(plastic_w / 2.0, 1))
+    print(f"  Plastic bottle  : {plastic_w:.1f} g")
+    print(f"  Trigger threshold set to: {WEIGHT_TRIGGER_THRESHOLD:.1f} g")
+
+    input("\n  Remove plastic bottle. Place your EMPTY GLASS BOTTLE on the scale, then press Enter...")
+    print("  Measuring glass bottle weight...")
+    time.sleep(0.5)
+    glass_w = get_weight()
+    # Midpoint between plastic and glass weight as the tiebreaker threshold
+    PLASTIC_GLASS_WEIGHT_THRESHOLD = round((plastic_w + glass_w) / 2.0, 1)
+    print(f"  Glass bottle    : {glass_w:.1f} g")
+    print(f"  Plastic/Glass threshold set to: {PLASTIC_GLASS_WEIGHT_THRESHOLD:.1f} g")
+
+    input("\n  Remove glass bottle. Press Enter to continue...")
+    print(f"\n  ✓ Weight thresholds calibrated:")
+    print(f"      Trigger (object detected) : ≥ {WEIGHT_TRIGGER_THRESHOLD:.1f} g")
+    print(f"      Plastic vs Glass tiebreak : ≥ {PLASTIC_GLASS_WEIGHT_THRESHOLD:.1f} g → GLASS")
+    print("=" * 60)
 # =============================================================================
 # 9. STARTUP CALIBRATION — STEP 2: Compartment Angles
 # =============================================================================
@@ -1367,7 +1466,7 @@ def path_2_material_detection() -> tuple[Material, float]:
     print(f"[PATH 2] Profiles loaded  "
           f"(plastic n={plastic_profile['n']}  glass n={glass_profile['n']})")
  
-    result, confidence, debug = _spec_scan_and_classify(plastic_profile, glass_profile)
+    result, confidence, debug = _spec_scan_and_classify(plastic_profile, glass_profile, samples=SPEC_SCAN_SAMPLES)
  
     if result is None:
         print("[PATH 2] ✗ Spectrometer classification failed → defaulting to PLASTIC  conf=0")
@@ -1394,6 +1493,7 @@ def main_pipeline():
 
     hx.reset()
     tare_scale()
+    # calibrate_weight_thresholds()
 
     # calibrate_center_point()
 
@@ -1429,23 +1529,14 @@ def main_pipeline():
                       f"{'TRIGGERED' if metal_sensor.value == 0 else 'CLEAR'}")
                 print("=" * 60)
 
+                print("[PIPELINE] Waiting for scale to settle...")
+                time.sleep(2.0)
+                weight = get_weight()
+                print(f"[PIPELINE] Settled weight: {weight:.1f} g")
+
                 print("\n[PIPELINE] Launching parallel detection paths...")
+                _tracking_pause.set()   # pause daemon — frees CPU for HX711 + inference
                 t_start = time.time()
-
-                # ---- Profiler START ----
-                _prof_wall_start = time.perf_counter()
-                _prof_cpu_start  = time.process_time()
-                _prof_rss_start  = _rss_mb()
-                _rss_poll_samples = []
-                _rss_poll_stop    = threading.Event()
-                def _rss_poller():
-                    while not _rss_poll_stop.is_set():
-                        _rss_poll_samples.append(_rss_mb())
-                        time.sleep(0.05)
-                _rss_poll_thread = threading.Thread(target=_rss_poller, daemon=True)
-                _rss_poll_thread.start()
-                # ---- Profiler START END ----
-
                 try:
                     with concurrent.futures.ThreadPoolExecutor(max_workers=2) as ex:
                         fv = ex.submit(path_1_vision_model)
@@ -1454,6 +1545,7 @@ def main_pipeline():
                         material_result, spec_conf = fm.result()
                 except Exception as e:
                     print(f"[PIPELINE] ✗ Detection path failed: {e} — defaulting to GENERAL_WASTE/others")
+                    _tracking_pause.clear()
                     _set_target(float(MATERIAL_TO_COMPARTMENT[Material.GENERAL_WASTE].value))
                     continue
 
@@ -1461,14 +1553,9 @@ def main_pipeline():
                 if vision_result is None or vision_result == "unknown":
                     print(f"[PIPELINE] ✗ Vision returned '{vision_result}' — defaulting to GENERAL_WASTE/others")
                     mqtt_publish_result(Material.GENERAL_WASTE, "general", "others", weight)
+                    _tracking_pause.clear()
                     _set_target(float(MATERIAL_TO_COMPARTMENT[Material.GENERAL_WASTE].value))
                     continue
-
-                # ---- Stop RSS poller ----
-                _rss_poll_stop.set()
-                _rss_poll_thread.join(timeout=0.2)
-                _prof_rss_peak_paths = max(_rss_poll_samples) if _rss_poll_samples else _rss_mb()
-                # ---- Stop RSS poller END ----
 
                 t_elapsed = time.time() - t_start
                 print(f"[PIPELINE] Both paths complete in {t_elapsed:.2f} s")
@@ -1490,22 +1577,7 @@ def main_pipeline():
                     final_decision  = Material.GENERAL_WASTE
                     mqtt_mat_str    = "general"
                     mqtt_shape_str  = "others"
-
-                # ---- Profiler STOP ----
-                _prof_wall_ms  = (time.perf_counter() - _prof_wall_start) * 1000
-                _prof_cpu_ms   = (time.process_time()  - _prof_cpu_start)  * 1000
-                _prof_rss_end  = _rss_mb()
-                print(f"\n{'='*54}")
-                print(f"[PROFILER]  DETECTION PIPELINE (trigger → decision)")
-                print(f"[PROFILER]    Wall clock       : {_prof_wall_ms:.1f} ms")
-                print(f"[PROFILER]    CPU time         : {_prof_cpu_ms:.1f} ms")
-                print(f"[PROFILER]    RSS start        : {_prof_rss_start:.1f} MB")
-                print(f"[PROFILER]    RSS peak (paths) : {_prof_rss_peak_paths:.1f} MB")
-                print(f"[PROFILER]    RSS end          : {_prof_rss_end:.1f} MB")
-                print(f"[PROFILER]    RSS delta        : {_prof_rss_end - _prof_rss_start:.1f} MB")
-                print(f"{'='*54}\n")
-                # ---- Profiler STOP END ----
-
+ 
                 compartment = MATERIAL_TO_COMPARTMENT.get(
                     final_decision, MATERIAL_TO_COMPARTMENT[Material.GENERAL_WASTE]
                 )
@@ -1520,6 +1592,7 @@ def main_pipeline():
                 print(f"[PIPELINE] ══════════════════════════════")
  
                 mqtt_publish_result(final_decision, mqtt_mat_str, mqtt_shape_str, weight)
+                _tracking_pause.clear()   # resume daemon so arm can move
                 _set_target(target_deg)
                 print(f"[PIPELINE] Arm in motion — waiting for cycle to complete...")
 
