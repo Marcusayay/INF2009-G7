@@ -22,10 +22,10 @@ import subprocess
 # =============================================================================
 # CAMERA DEVICE CONFIGURATION — change these to swap cameras easily
 # =============================================================================
-TRACKING_CAM_DEV   = "/dev/video0"   # servo tracking arm camera
-TRACKING_CAM_INDEX = 0               # OpenCV VideoCapture index for tracking cam
-VISION_CAM_DEV     = "/dev/video2"   # MobileNet inference camera
-VISION_CAM_INDEX   = 2               # OpenCV VideoCapture index for vision cam
+TRACKING_CAM_DEV   = "/dev/video2"   # servo tracking arm camera
+TRACKING_CAM_INDEX = 2               # OpenCV VideoCapture index for tracking cam
+VISION_CAM_DEV     = "/dev/video0"   # MobileNet inference camera
+VISION_CAM_INDEX   = 0               # OpenCV VideoCapture index for vision cam
 
 subprocess.run(["v4l2-ctl", "-d", VISION_CAM_DEV, "--set-ctrl=auto_exposure=3"],          check=False)
 subprocess.run(["v4l2-ctl", "-d", VISION_CAM_DEV, "--set-ctrl=brightness=128"],            check=False)
@@ -120,7 +120,7 @@ def correct_frame(frame):
 hx = HX711(dout_pin=15, pd_sck_pin=14)
 RATIO  = 120.20
 OFFSET = 0
-WEIGHT_TRIGGER_THRESHOLD = 2.0
+WEIGHT_TRIGGER_THRESHOLD = 5.0
 
 METAL_CONTAMINATION_WEIGHT_LIMIT = 40.0
 PLASTIC_GLASS_WEIGHT_THRESHOLD = 25.0
@@ -268,7 +268,7 @@ else:
 # 1d. MQTT — publishes one message per classification cycle
 # =============================================================================
 
-MQTT_BROKER = "10.254.93.107"
+MQTT_BROKER = "10.37.181.107"
 MQTT_PORT   = 1883
 MQTT_TOPIC  = "pi/raw_transaction"
 
@@ -480,7 +480,7 @@ def tare_scale():
     input("[SCALE]  Ensure platform is EMPTY then press Enter to tare...")
     time.sleep(3)
     with _hx711_lock:
-        vals = hx.get_raw_data(20)
+        vals = hx.get_raw_data(50)
     if vals:
         clean   = _iqr_clean(vals)
         OFFSET  = int(sum(clean) / len(clean))
@@ -1484,6 +1484,7 @@ def path_2_material_detection() -> tuple[Material, float]:
 def main_pipeline():
     global target_angle_20, outbound_direction, is_homing
     global plastic_profile, glass_profile
+    global OFFSET, RATIO
 
     # --- Beam sensor pre-check ---
     if beam_sensor.is_pressed:
@@ -1497,8 +1498,10 @@ def main_pipeline():
             print("[WARNING] Beam still broken — continuing anyway.")
 
     hx.reset()
+    time.sleep(2.0)   # HX711 needs time to stabilize after reset before tare is reliable
     tare_scale()
     calibrate_ratio()
+
     # calibrate_weight_thresholds()
 
     # calibrate_center_point()
@@ -1516,14 +1519,32 @@ def main_pipeline():
     set_angle_instant_21(0)
 
 
+    # Silent auto-tare — corrects any mechanical creep or HX711 drift
+    # that accumulated during the calibration sequence
+    print("[SCALE]  Settling after calibration...")
+    time.sleep(3.0)
+    with _hx711_lock:
+        _auto_tare_vals = hx.get_raw_data(50)
+    if _auto_tare_vals:
+        _auto_tare_clean = _iqr_clean(_auto_tare_vals)
+        OFFSET = int(sum(_auto_tare_clean) / len(_auto_tare_clean))
+        print(f"[SCALE]  Auto-tare complete. OFFSET={OFFSET}")
+
     print("\n" + "=" * 60)
     print("  ALL CALIBRATION COMPLETE")
     print("  SYSTEM ONLINE — AWAITING OBJECT")
     print("=" * 60 + "\n")
 
+    # Use the first reading as a live zero correction — absorbs any residual
+    # drift that survived the auto-tare (e.g. -14g → bakes that into OFFSET)
+    _first_w = get_weight()
+    OFFSET = int(OFFSET + _first_w * RATIO)
+    print(f"[SCALE]  Live zero correction: {_first_w:+.1f} g → OFFSET adjusted to {OFFSET}")
+
     try:
         while True:
             weight = get_weight()
+            print(f"[SCALE] {weight:.1f} g")
 
             if weight > WEIGHT_TRIGGER_THRESHOLD and target_angle_20 is None:
                 print("\n" + "=" * 60)
@@ -1560,8 +1581,9 @@ def main_pipeline():
 
                 # Guard None return from vision (timeout with empty buffer)
                 if vision_result is None or vision_result == "unknown":
-                    print(f"[PIPELINE] ✗ Vision returned '{vision_result}' — defaulting to GENERAL_WASTE/others")
-                    mqtt_publish_result(Material.GENERAL_WASTE, "general", "others", weight)
+                    _fallback_type = f"others/{material_result.value.lower()}"
+                    print(f"[PIPELINE] ✗ Vision returned '{vision_result}' — defaulting to GENERAL_WASTE/{_fallback_type}")
+                    mqtt_publish_result(Material.GENERAL_WASTE, "general", _fallback_type, weight)
                     _tracking_pause.clear()
                     _set_target(float(MATERIAL_TO_COMPARTMENT[Material.GENERAL_WASTE].value))
                     continue
@@ -1609,6 +1631,12 @@ def main_pipeline():
                     time.sleep(0.5)
 
                 print(f"[PIPELINE] Cycle complete. Resuming idle.\n")
+
+                # Re-zero after object dropped — absorbs any drift since last tare
+                time.sleep(0.5)
+                _drift_w = get_weight()
+                OFFSET = int(OFFSET + _drift_w * RATIO)
+                print(f"[SCALE]  Re-zero: {_drift_w:+.1f} g drift → OFFSET adjusted to {OFFSET}")
 
             time.sleep(0.2)
 
